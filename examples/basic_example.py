@@ -2,7 +2,7 @@
 This is a basic use case of the SDyPy template project.
 """
 
-import sdypy_template_project as iep
+import source as iep
 import numpy as np
 import matplotlib.pyplot as plt
 

@@ -10,7 +10,7 @@ from matplotlib import pyplot as plt
 from matplotlib import animation
 from pyMRAW import load_video
 
-from .visualize import animate_video
+from .kernels import animate_video
 
 import warnings
 warnings.filterwarnings("ignore")
