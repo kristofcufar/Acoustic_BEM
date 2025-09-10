@@ -98,6 +98,66 @@ def standard_triangle_quad(order: int = 1,
     
     return quad_points, quad_weights
 
+def refined_triangle_quad(xi_eta: np.ndarray,
+                          weights: np.ndarray,
+                          ) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Refine a single triangle into four smaller triangles and adjust the
+    quadrature points and weights accordingly.
+
+    Args:
+        xi_eta (np.ndarray): Array of shape (N, 2) representing the
+            quadrature points in barycentric coordinates.
+        weights (np.ndarray): Array of shape (N,) representing the
+            quadrature weights.
+
+    Returns:
+        xi_eta_ref (np.ndarray): Array of shape (4N, 2) representing the
+            refined quadrature points in barycentric coordinates.
+        w_ref (np.ndarray): Array of shape (4N,) representing the
+            refined quadrature weights.
+    """
+    X = xi_eta
+    xi  = X[:, 0]
+    eta = X[:, 1]
+    Wq = weights * 0.25
+
+    X1 = np.column_stack((      0.5 * xi,            0.5 * eta))
+    X2 = np.column_stack((0.5 + 0.5 * xi,            0.5 * eta))
+    X3 = np.column_stack((      0.5 * xi,      0.5 + 0.5 * eta))
+    X4 = np.column_stack((0.5 - 0.5 * xi, 0.5 * xi + 0.5 * eta))
+
+    xi_eta_ref = np.vstack((X1, X2, X3, X4))
+    w_ref      = np.concatenate((Wq, Wq, Wq, Wq))
+    return xi_eta_ref, w_ref
+
+def subdivide_triangle_quad(xi_eta: np.ndarray,
+                            weights: np.ndarray,
+                            levels: int = 1,
+                            ) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Recursively refine a triangle into smaller triangles and adjust the
+    quadrature points and weights accordingly.
+
+    Args:
+        xi_eta (np.ndarray): Array of shape (N, 2) representing the
+            quadrature points in barycentric coordinates.
+        weights (np.ndarray): Array of shape (N,) representing the
+            quadrature weights.
+        levels (int, optional): Number of refinement levels. Each level
+            subdivides each triangle into four smaller triangles. Default is 1.
+    
+    Returns:
+        tuple[np.ndarray, np.ndarray]: Refined quadrature points and weights.
+    """
+    pts = np.asarray(xi_eta, dtype=float)
+    w   = np.asarray(weights, dtype=float)
+
+    for _ in range(levels):
+        pts, w = refined_triangle_quad(pts, w)
+
+    return pts, w
+
 def duffy_rule(n_leg: int = 8,
                sing_vert_int: int = 0) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -144,8 +204,8 @@ def telles_rule(u_star: float,
 
     'The transformation is a cubic polynomial that maps the Gauss-Legendre 
     points in [0, 1] onto itself, and has zero Jacobian at the singularity
-    location u_star. The parameter s0 controls the clustering of points near
-    the singularity.'
+    location u_star. The parameter s0 is a reference GL point that controls
+    the clustering of points around the singularity.'
 
     Args:
         u_star (float): u-coordinate of the singularity in the reference
