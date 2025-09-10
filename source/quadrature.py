@@ -1,7 +1,10 @@
+import warnings
 import numpy as np
 
 def map_to_physical_triangle(xi_eta: np.ndarray,
-                             vertex_coords: np.ndarray,
+                             v0: np.ndarray,
+                             e1: np.ndarray,
+                             e2: np.ndarray
                              ) -> tuple[np.ndarray, float]:
     
     """
@@ -11,8 +14,12 @@ def map_to_physical_triangle(xi_eta: np.ndarray,
     Args:
         xi_eta (np.ndarray): Array of shape (N, 2) representing the
             quadrature points in barycentric coordinates.
-        vertex_coords (np.ndarray): Array of shape (3, 3) representing the 
-            coordinates of the triangle vertices.
+        v0 (np.ndarray): Array of shape (3,) representing the first
+            vertex of the triangle.
+        e1 (np.ndarray): Array of shape (3,) representing the edge
+            vector from v0 to v1.
+        e2 (np.ndarray): Array of shape (3,) representing the edge
+            vector from v0 to v2.
     
     Returns:
         y_phys (np.ndarray): Array of shape (N, 3) representing the
@@ -20,15 +27,43 @@ def map_to_physical_triangle(xi_eta: np.ndarray,
         a2 (float): Jacobian scale (||e1×e2||), i.e. twice the *physical* 
             triangle area.
     """
-
-    v0, v1, v2 = vertex_coords
-    e1 = v1 - v0
-    e2 = v2 - v0
     y_phys = v0[None, :] + \
             xi_eta[:, [0]] * e1[None, :] + \
             xi_eta[:, [1]] * e2[None, :]
     a2 = np.linalg.norm(np.cross(e1, e2))
     return y_phys, a2
+
+def map_to_physical_triangle_batch(xi_eta: np.ndarray,
+                                   v0: np.ndarray,
+                                   e1: np.ndarray,
+                                   e2: np.ndarray) -> tuple[np.ndarray, 
+                                                            np.ndarray]:
+    """
+    Vectorized mapping for K triangles at once.
+
+    Args:
+        xi_eta (np.ndarray): Array of shape (Q, 2) representing the
+            quadrature points in barycentric coordinates.
+        v0 (np.ndarray): Array of shape (K, 3) representing the first
+            vertex of each triangle.
+        e1 (np.ndarray): Array of shape (K, 3) representing the edge
+            vector from v0 to v1 for each triangle.
+        e2 (np.ndarray): Array of shape (K, 3) representing the edge
+            vector from v0 to v2 for each triangle.
+
+    Returns:
+        y (np.ndarray): Array of shape (K, Q, 3) representing the
+            quadrature points in physical coordinates.
+        a2 (np.ndarray): Array of shape (K,) representing the Jacobian
+            scale (||e1×e2||), i.e. twice the *physical* triangle area.
+    """
+    xi = xi_eta[:, 0][None, :]
+    eta = xi_eta[:, 1][None, :]
+    y = v0[:, None, :] + \
+        xi[..., None]*e1[:, None, :] + \
+        eta[..., None]*e2[:, None, :]
+    a2 = np.linalg.norm(np.cross(e1, e2), axis=1)
+    return y, a2
 
 def shape_functions_P1(xi_eta: np.ndarray) -> np.ndarray:
     """
@@ -42,9 +77,10 @@ def shape_functions_P1(xi_eta: np.ndarray) -> np.ndarray:
         N (np.ndarray): Array of shape (N, 3) representing the values of 
             the three P1 shape functions at the given points.
     """
-    xi = xi_eta[:, 0]
-    eta = xi_eta[:, 1]
-    N = np.column_stack([1.0 - xi - eta, xi, eta])
+    N = np.empty((xi_eta.shape[0], 3), dtype=xi_eta.dtype)
+    N[:,1] = xi_eta[:,0]
+    N[:,2] = xi_eta[:,1]
+    N[:,0] = 1.0 - N[:,1] - N[:,2]
     return N
 
 def standard_triangle_quad(order: int = 1,
@@ -96,7 +132,10 @@ def standard_triangle_quad(order: int = 1,
         raise ValueError("Unsupported quadrature order. Supported orders are "
                          "1, 3, and 7.")
     
-    return quad_points, quad_weights
+    pts = np.asarray(quad_points, dtype=np.float64, order='C')
+    w = np.asarray(quad_weights, dtype=np.float64, order='C')
+
+    return pts, w
 
 def refined_triangle_quad(xi_eta: np.ndarray,
                           weights: np.ndarray,
@@ -129,6 +168,7 @@ def refined_triangle_quad(xi_eta: np.ndarray,
 
     xi_eta_ref = np.vstack((X1, X2, X3, X4))
     w_ref      = np.concatenate((Wq, Wq, Wq, Wq))
+
     return xi_eta_ref, w_ref
 
 def subdivide_triangle_quad(xi_eta: np.ndarray,
@@ -153,8 +193,16 @@ def subdivide_triangle_quad(xi_eta: np.ndarray,
     pts = np.asarray(xi_eta, dtype=float)
     w   = np.asarray(weights, dtype=float)
 
+    if levels < 1:
+        warnings.warn("Number of refinement levels must be at least 1. "
+                      "Returning original points and weights.")
+        return pts, w
+
     for _ in range(levels):
         pts, w = refined_triangle_quad(pts, w)
+
+    pts = np.asarray(pts, dtype=np.float64, order='C')
+    w   = np.asarray(w, dtype=np.float64, order='C')
 
     return pts, w
 
@@ -181,23 +229,24 @@ def duffy_rule(n_leg: int = 8,
     u, wu = gauss_legendre_1d(n_leg)
     v, wv = gauss_legendre_1d(n_leg)
 
-    U, V = np.meshgrid(u, v, indexing='ij')
-    W = np.outer(wu, wv)
+    # vectorized without meshgrid
+    XI  = np.multiply.outer(u, (1.0 - v))
+    ETA = np.multiply.outer(u, v)
+    w   = (np.multiply.outer(wu, wv) * u[:, None]).ravel()
 
-    XI  = U * (1.0 - V)
-    ETA = U * V
-    quad_weights = (W * U).ravel() 
-
-    quad_points = np.stack([XI.ravel(), ETA.ravel()], axis=1)
+    pts = np.stack([XI.ravel(), ETA.ravel()], axis=1)
     if sing_vert_int != 0:
-        quad_points = permute_to_vertex(quad_points, sing_vert_int) 
-    return quad_points, quad_weights
+        pts = permute_to_vertex(pts, sing_vert_int)
+
+    pts = np.asarray(pts, dtype=np.float64, order='C')
+    w   = np.asarray(w, dtype=np.float64, order='C')
+
+    return pts, w
 
 def telles_rule(u_star: float,
                 v_star: float | None = None,
                 sing_vert_int: int = 0,
-                n_leg: int = 8,
-                s0: float = 0.5) -> tuple[np.ndarray, np.ndarray]:
+                n_leg: int = 8) -> tuple[np.ndarray, np.ndarray]:
     """
     Generate quadrature points and weights for a triangle using the Telles 
     transformation from a square.
@@ -216,8 +265,6 @@ def telles_rule(u_star: float,
             singularity is located. Default is 0.
         n_leg (int, optional): Number of Gauss-Legendre points along one edge
             of the square. Default is 8.
-        s0 (float, optional): Reference GL point for clustering. Default is 
-            0.5.
 
     Returns:
         quad_points (np.ndarray): Array of shape (N, 2) representing the
@@ -226,29 +273,31 @@ def telles_rule(u_star: float,
             quadrature weights.
     """
 
-    u_nodes, w_u = gauss_legendre_1d(n_leg)
-    v_nodes, w_v = gauss_legendre_1d(n_leg)
+    u_nodes, wu = gauss_legendre_1d(n_leg)
+    v_nodes, wv = gauss_legendre_1d(n_leg)
 
-    u_mapped, du_mapped_du = telles_cubic_1d(u_nodes, u_star, s0)
-    if v_star is None:
-        v_mapped, dv_mapped_dv = v_nodes, np.ones_like(v_nodes)
+    s0_u = np.clip(u_star, 0.1, 0.9)        
+
+    u_map, du = telles_cubic_1d(u_nodes, u_star, s0_u)
+    if v_star is not None:
+        s0_v = np.clip(v_star, 0.1, 0.9)
+        v_map, dv = telles_cubic_1d(v_nodes, v_star, s0_v)
     else:
-        v_mapped, dv_mapped_dv = telles_cubic_1d(v_nodes, v_star, s0)
+        v_map, dv = v_nodes, np.ones_like(v_nodes)
 
-    U, V = np.meshgrid(u_mapped, v_mapped, indexing='ij')
-    dU, dV = np.meshgrid(du_mapped_du, dv_mapped_dv, indexing='ij')
-    W_u, W_v = np.meshgrid(w_u, w_v, indexing='ij')
+    XI  = np.multiply.outer(u_map, (1.0 - v_map))
+    ETA = np.multiply.outer(u_map, v_map)
+    w   = (np.multiply.outer(wu, wv) * \
+           np.multiply.outer(du, dv) * u_map[:, None]).ravel()
 
-    XI = U * (1.0 - V)
-    ETA = U * V
-
-    quad_points = np.column_stack([XI.ravel(), ETA.ravel()])
-    quad_weights = (W_u * W_v * dU * dV * U).ravel()
-
+    pts = np.stack([XI.ravel(), ETA.ravel()], axis=1)
     if sing_vert_int != 0:
-        quad_points = permute_to_vertex(quad_points, sing_vert_int)
+        pts = permute_to_vertex(pts, sing_vert_int)
 
-    return quad_points, quad_weights
+    pts = np.asarray(pts, dtype=np.float64, order='C')
+    w   = np.asarray(w, dtype=np.float64, order='C')
+    
+    return pts, w
 
 def gauss_legendre_1d(n:int) -> tuple[np.ndarray, np.ndarray]:
     """
