@@ -83,6 +83,21 @@ def shape_functions_P1(xi_eta: np.ndarray) -> np.ndarray:
     N[:,0] = 1.0 - N[:,1] - N[:,2]
     return N
 
+def shape_function_gradients_P1() -> np.ndarray:
+    """
+    Compute the gradients of the P1 (linear) shape functions in the 
+    reference triangle.
+
+    Returns:
+        dN_dxi (np.ndarray): Array of shape (3, 2) representing the 
+            gradients of the three P1 shape functions with respect to 
+            (xi, eta).
+    """
+    dN_dxi = np.array([[-1.0, -1.0],
+                       [ 1.0,  0.0],
+                       [ 0.0,  1.0]])
+    return dN_dxi
+
 def standard_triangle_quad(order: int = 1,
                            ) -> tuple[np.ndarray, np.ndarray]:
     

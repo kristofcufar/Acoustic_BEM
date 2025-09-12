@@ -1,7 +1,6 @@
 import numpy as np
-from tqdm import tqdm
 
-class Core:
+class Mesh:
     def __init__(self,
                  mesh_nodes: np.ndarray,
                  mesh_elements: np.ndarray,
@@ -58,6 +57,8 @@ class Core:
             - n_hat: Unit normal vector of each triangle.
             - centroids: Centroid of each triangle.
             - areas: Area of each triangle.
+            - node_normals: Area-weighted normals at each mesh node.
+            - char_length: Characteristic length of the mesh.
         """
         v0 = self.mesh_nodes[self.mesh_elements[:, 0], :]
         v1 = self.mesh_nodes[self.mesh_elements[:, 1], :]
@@ -70,6 +71,7 @@ class Core:
         centroids = (v0 + v1 + v2) / 3.0
         areas = 0.5 * a2
         node_normals = self.node_normals()
+        char_length = self.get_characteristic_length()
 
         self.v0 = v0
         self.e1 = e1
@@ -79,14 +81,15 @@ class Core:
         self.centroids = centroids
         self.areas = areas
         self.node_normals = node_normals
+        self.char_length = char_length
 
     def node_normals(self) -> np.ndarray:
         """
-        Compute angle-weighted normals at each mesh node.
+        Compute area-weighted normals at each mesh node.
 
         Returns:
             node_normals (np.ndarray): Array of shape (N, 3) representing the
-                angle-weighted normals at each mesh node.
+                area-weighted normals at each mesh node.
         """
         node_normals = np.zeros((self.num_nodes, 3))
         for elem in range(self.num_elements):
@@ -97,3 +100,14 @@ class Core:
         node_normals /= np.linalg.norm(node_normals, axis=1)[:, np.newaxis] \
                         + 1e-300
         return node_normals
+    
+    def get_characteristic_length(self) -> float:
+        """
+        Compute the characteristic length of the mesh.
+
+        Returns:
+            char_length (float): Characteristic length of the mesh.
+        """
+        total_area = np.sum(self.areas)
+        char_length = np.sqrt(total_area / self.num_elements)
+        return char_length
