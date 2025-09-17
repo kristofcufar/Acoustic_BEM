@@ -5,6 +5,10 @@ def r_vec(x: np.ndarray,
     """
     Compute the vector from points y to points x.
 
+    r_vec = x - y
+    r_norm = ||r_vec||
+    r_hat = r_vec / r_norm
+
     Args:
         x (np.ndarray): Array of shape (..., 3) representing points x.
         y (np.ndarray): Array of shape (..., 3) representing points y.
@@ -28,6 +32,8 @@ def G(r_norm: np.ndarray,
     """
     Compute the Green's function for the Helmholtz equation in 3D.
 
+    G(r) = e^{ikr}/(4π r)
+
     Args:
         r_norm (np.ndarray): Array of shape (...) representing the distance 
             between source and field points.
@@ -44,6 +50,9 @@ def dG_dr(r_norm: np.ndarray,
     """
     Compute the derivative of the Green's function with respect to r.
 
+    For G(r) = e^{ikr}/(4π r):
+        dG/dr = (ik - 1/r) * G
+
     Args:
         r_norm (np.ndarray): Array of shape (...) representing the distance 
             between source and field points.
@@ -54,7 +63,31 @@ def dG_dr(r_norm: np.ndarray,
         dG_dr (np.ndarray): Array of shape (...) representing the derivative 
             of the Green's function with respect to r.
     """
-    return G * (1j * k - 1 / r_norm) / r_norm
+    return G * (1j * k - 1 / r_norm)
+
+def d2G_dr2(r: np.ndarray, 
+            G_vals: np.ndarray, 
+            k: float) -> np.ndarray:
+    """
+    Second radial derivative d^2G/dr^2 for 3D Helmholtz.
+
+    For G(r) = e^{ikr}/(4π r):
+        d^2G/dr^2 = (-k^2 - 2i k / r + 2 / r^2) * G
+
+    Args:
+        r (np.ndarray): Array of shape (...) representing the distance 
+            between source and field points.
+        G_vals (np.ndarray): Array of shape (...) representing the Green's
+            function values G(r,k).
+        k (float): Wavenumber.
+
+    Returns:
+        d2G_dr2: Same shape as r (complex).
+    """
+
+    eps = np.finfo(float).eps
+    r_safe = np.where(r == 0, eps, r)
+    return ((-k**2) - (2j * k) / r_safe + 2.0 / (r_safe**2)) * G_vals
 
 def dG_dn_y(r_hat: np.ndarray,
             dG_dr: np.ndarray,
@@ -62,6 +95,9 @@ def dG_dn_y(r_hat: np.ndarray,
     """
     Compute the normal derivative of the Green's function with respect to
     the source point y.
+
+    For G(r) = e^{ikr}/(4π r) and dG/dr = (ik - 1/r) G:
+        ∂G/∂n_y = -dG/dr (r_hat · n_y)
 
     Args:
         r_hat (np.ndarray): Array of shape (..., 3) representing the unit 
@@ -84,6 +120,9 @@ def dG_dn_x(r_hat: np.ndarray,
     Compute the normal derivative of the Green's function with respect to
     the field point x.
 
+    For G(r) = e^{ikr}/(4π r) and dG/dr = (ik - 1/r) G:
+        ∂G/∂n_x = dG/dr (r_hat · n_x)
+
     Args:
         r_hat (np.ndarray): Array of shape (..., 3) representing the unit 
             vector in the direction from y to x.
@@ -98,30 +137,53 @@ def dG_dn_x(r_hat: np.ndarray,
     """
     return dG_dr * np.einsum('...i,...i->...', r_hat, n_x)
 
+
 def d2G_dn_x_dn_y(r_hat: np.ndarray,
-                 dG_dr: np.ndarray,
-                 n_x: np.ndarray,
-                 n_y: np.ndarray) -> np.ndarray:
+                  r: np.ndarray,
+                  n_x: np.ndarray,
+                  n_y: np.ndarray,
+                  G_vals: np.ndarray,
+                  k: float,
+                  ) -> np.ndarray:
     """
-    Compute the second normal derivative of the Green's function with respect
-    to both the field point x and the source point y.
+    Direct hypersingular kernel ∂²G/(∂n_x ∂n_y) for 3D Helmholtz.
+
+    Uses the identity:
+        ∂²G/∂n_x∂n_y
+        = - f''(r) (r_hat·n_x)(r_hat·n_y)
+          - (f'(r)/r) [ (n_x·n_y) - (r_hat·n_x)(r_hat·n_y) ],
+
+    where f'(r) = dG/dr = (ik - 1/r) G, and
+          f''(r) = d²G/dr² = (-k² - 2ik/r + 2/r²) G.
 
     Args:
         r_hat (np.ndarray): Array of shape (..., 3) representing the unit 
             vector in the direction from y to x.
-        dG_dr (np.ndarray): Array of shape (...) representing the derivative 
-            of the Green's function with respect to r.
+        r (np.ndarray): Array of shape (...,) representing the distance 
+            between source and field points.
         n_x (np.ndarray): Array of shape (..., 3) representing the normal 
             vector at point x.
         n_y (np.ndarray): Array of shape (..., 3) representing the normal 
             vector at point y.
+        G_vals (np.ndarray): Array of shape (...,) representing the Green's
+            function values G(r,k).
+        k (float): Wavenumber.
 
     Returns:
         d2G_dn_x_dn_y (np.ndarray): Array of shape (...) representing the 
             second normal derivative of the Green's function with respect to 
             both x and y.
     """
-    term1 = (1 / r_hat.shape[-1]) * np.einsum('...i,...i->...', n_x, n_y)
-    term2 = np.einsum('...i,...i->...', r_hat, n_x) * \
-        np.einsum('...i,...i->...', r_hat, n_y)
-    return dG_dr * (term1 - term2)
+
+    # f'(r) and f''(r)
+    dGr = dG_dr(r, G_vals, k)
+    d2Gr = d2G_dr2(r, G_vals, k)
+
+    nx_dot_ny = np.einsum("...i,...i->...", n_x, n_y)
+    nx_dot_rh = np.einsum("...i,...i->...", n_x, r_hat)
+    ny_dot_rh = np.einsum("...i,...i->...", n_y, r_hat)
+
+    term1 = -d2Gr * (nx_dot_rh * ny_dot_rh)
+    term2 = -(dGr / r) * (nx_dot_ny - nx_dot_rh * ny_dot_rh)
+
+    return term1 + term2

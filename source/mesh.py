@@ -47,6 +47,8 @@ class Mesh:
         self.omega = 2 * np.pi * frequency
         self.k = self.omega / c0
 
+        self.precompute_elements()
+
     def precompute_elements(self):
         """
         Precompute geometric properties of the mesh elements. Initializes:
