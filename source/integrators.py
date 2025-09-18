@@ -1,143 +1,29 @@
 import numpy as np
-from typing import Tuple, Literal, Optional, List, Dict, Callable
-from kernels import r_vec, G, dG_dr, dG_dn_y, dG_dn_x, d2G_dn_x_dn_y
-from quadrature import (standard_triangle_quad, subdivide_triangle_quad,
+from typing import Tuple, Literal, Optional
+from source.kernels import r_vec, G, dG_dr, dG_dn_y, dG_dn_x, d2G_dn_x_dn_y
+from source.quadrature import (standard_triangle_quad, subdivide_triangle_quad,
                        telles_rule, duffy_rule, map_to_physical_triangle_batch,
                        shape_functions_P1)
 
-from mesh import Mesh
+from source.mesh import Mesh
 
 class ElementIntegratorCollocation:
     """
     Element-wise integrator for acoustic boundary element method.
     
     Provides efficient vectorized integration methods for single layer, double 
-    layer, adjoint double layer, and hypersingular boundary integrals. Supports
-    different quadrature rules and both regular and singular integration 
-    strategies.
+    layer, adjoint double layer, and hypersingular boundary integrals.
     """
     
     def __init__(self, 
-                 k: float,
-                 regular_quad_order: int = 3,
-                 near_singular_levels: int = 2,
-                 singular_n_leg: int = 8,
-                 near_singular_threshold: float = 2.0):
+                 k: float,):
         """
         Initialize the element integrator.
 
         Args:
             k: Wavenumber for Helmholtz kernel.
-            regular_quad_order: Quadrature order for regular integrals (1, 3, 
-                or 7).
-            near_singular_levels: Number of subdivision levels for near-
-                singular integrals.
-            singular_n_leg: Number of Gauss-Legendre points for singular 
-                integrals.
-            near_singular_threshold: Distance threshold for near-singular 
-                detection (in terms of element characteristic size).
         """
         self.k = k
-        self.regular_quad_order = regular_quad_order
-        self.near_singular_levels = near_singular_levels
-        self.singular_n_leg = singular_n_leg
-        self.near_singular_threshold = near_singular_threshold
-        
-        # Precompute standard quadrature rules
-        self.xi_eta_regular, self.w_regular = \
-            standard_triangle_quad(regular_quad_order)
-        self.xi_eta_near, self.w_near = subdivide_triangle_quad(
-            self.xi_eta_regular, self.w_regular, levels=near_singular_levels)
-
-    def get_quadrature_rule(self, 
-                           rule_type: Literal["standard", 
-                                              "duffy", 
-                                              "telles", 
-                                              "subdivide"],
-                           rule_kwargs: Optional[dict] = None,
-                           ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Get quadrature points and weights for specified rule.
-
-        Args:
-            rule_type (Literal["standard", "duffy", "telles", "subdivide"]): 
-                Type of quadrature rule to use.
-            rule_kwargs (Optional[dict]): Additional keyword arguments for the 
-                quadrature rule.
-
-        Returns:
-            Tuple of (xi_eta, weights) arrays for the specified rule.
-
-        Raises:
-            ValueError: If rule_type is not recognized.
-        """
-        if rule_kwargs is None:
-            rule_kwargs = {}
-            
-        if rule_type == "standard":
-            return self.xi_eta_regular, self.w_regular
-        elif rule_type == "duffy":
-            return duffy_rule(n_leg=rule_kwargs.get('n_leg', 
-                                                    self.singular_n_leg))
-        elif rule_type == "telles":
-            return telles_rule(
-                u_star=rule_kwargs.get('u_star', 0.0),
-                v_star=rule_kwargs.get('v_star', None),
-                sing_vert_int=rule_kwargs.get('sing_vert_int', 0),
-                n_leg=rule_kwargs.get('n_leg', self.singular_n_leg))
-        elif rule_type == "subdivide":
-            return self.xi_eta_near, self.w_near
-        else:
-            raise ValueError(f"Unknown quadrature rule: {rule_type}")
-
-    def classify_integration_type(self,
-                                 x_centroid: np.ndarray,
-                                 y_centroids: np.ndarray, 
-                                 y_sizes: np.ndarray,
-                                 x_elem_idx: Optional[int] = None,
-                                 y_elem_indices: Optional[np.ndarray] = None,
-                                 ) -> np.ndarray:
-        """
-        Classify integration types for a batch of element interactions.
-
-        Args:
-            x_centroid (np.ndarray): Centroid of the observation element,
-                shape (3,).
-            y_centroids (np.ndarray): Centroids of source elements, shape
-                (K, 3).
-            y_sizes (np.ndarray): Characteristic sizes of source elements, shape
-                (K,).
-            x_elem_idx (Optional[int]): Field element index (for singular
-                detection).
-            y_elem_indices (Optional[np.ndarray]): Source element indices, shape
-                (K,).
-
-        Returns:
-            Array of strings indicating integration type for each interaction, 
-                shape (K,).
-            Values are 'singular', 'near_singular', or 'regular'.
-        """
-        K = len(y_centroids)
-        integration_types = np.full(K, 'regular', dtype='<U12')
-        
-        if x_elem_idx is not None and y_elem_indices is not None:
-            singular_mask = (y_elem_indices == x_elem_idx)
-            integration_types[singular_mask] = 'singular'
-            regular_mask = ~singular_mask
-        else:
-            regular_mask = np.ones(K, dtype=bool)
-        
-        if np.any(regular_mask):
-            distances = np.linalg.norm(
-                y_centroids[regular_mask] - x_centroid[None, :], axis=1)
-            threshold_distances = \
-                self.near_singular_threshold * y_sizes[regular_mask]
-
-            near_singular_local = distances < threshold_distances
-            integration_types[regular_mask] = np.where(
-                near_singular_local, 'near_singular', 'regular')
-        
-        return integration_types
 
     def single_layer_batch(self, 
                           x: np.ndarray,

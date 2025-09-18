@@ -48,6 +48,8 @@ class Mesh:
         self.k = self.omega / c0
 
         self.precompute_elements()
+        self.node_normals()
+        self.get_characteristic_length()
 
     def precompute_elements(self):
         """
@@ -72,8 +74,7 @@ class Mesh:
         n_hat = cross / (a2[:, np.newaxis] + 1e-300)
         centroids = (v0 + v1 + v2) / 3.0
         areas = 0.5 * a2
-        node_normals = self.node_normals()
-        char_length = self.get_characteristic_length()
+        node_in_el = [self.node_in_element(i) for i in range(self.num_nodes)]
 
         self.v0 = v0
         self.e1 = e1
@@ -82,8 +83,7 @@ class Mesh:
         self.n_hat = n_hat
         self.centroids = centroids
         self.areas = areas
-        self.node_normals = node_normals
-        self.char_length = char_length
+        self.node_in_el = node_in_el
 
     def node_normals(self) -> np.ndarray:
         """
@@ -101,7 +101,7 @@ class Mesh:
                 
         node_normals /= np.linalg.norm(node_normals, axis=1)[:, np.newaxis] \
                         + 1e-300
-        return node_normals
+        self.node_n_hat = node_normals
     
     def get_characteristic_length(self) -> float:
         """
@@ -110,6 +110,19 @@ class Mesh:
         Returns:
             char_length (float): Characteristic length of the mesh.
         """
-        total_area = np.sum(self.areas)
-        char_length = np.sqrt(total_area / self.num_elements)
-        return char_length
+        self.char_length = np.maximum.reduce([np.linalg.norm(self.e1, axis=1),
+                                  np.linalg.norm(self.e2, axis=1),
+                                  np.linalg.norm(self.e1 - self.e2, axis=1)])
+    
+    def node_in_element(self, node_idx: int) -> np.ndarray:
+        """
+        Get the indices of elements connected to a given node.
+
+        Args:
+            node_idx (int): Index of the node.
+
+        Returns:
+            elements (np.ndarray): Array of element indices connected to the 
+                given node.
+        """
+        return np.where(self.mesh_elements == node_idx)[0]
