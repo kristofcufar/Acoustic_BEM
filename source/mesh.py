@@ -51,6 +51,7 @@ class Mesh:
         self.node_normals()
         self.get_characteristic_length()
         self.compute_jump_coefficients()
+        self.project_velocity_bc()
 
     def precompute_elements(self):
         """
@@ -182,3 +183,34 @@ class Mesh:
             coeff[node_idx] = solid_angle / (4.0 * np.pi)
 
         self.jump_coefficients = coeff
+
+    def project_velocity_bc(self) -> None:
+        """Project vector velocity boundary data onto the mesh normals.
+
+        If ``self.velocity_BC`` is given as full 3-D velocity components
+        with shape (num_nodes, 3), this replaces it by its scalar
+        projection along the nodal normals:
+
+            q_i = v_i · n_i
+
+        where ``v_i`` is the velocity vector at node i and ``n_i`` is the
+        unit outward normal stored in ``self.node_n_hat``.
+
+        Does nothing if ``velocity_BC`` is already 1-D.
+
+        Raises:
+            ValueError: if velocity_BC has an unexpected shape.
+        """
+        if self.velocity_BC.ndim == 1:
+            return  # already scalar
+
+        if self.velocity_BC.shape == (self.num_nodes, 3):
+            self.velocity_BC = np.einsum(
+                "ij,ij->i", self.velocity_BC, self.node_n_hat
+            )
+            return
+
+        raise ValueError(
+            f"velocity_BC has shape {self.velocity_BC.shape}, "
+            f"expected ({self.num_nodes},) or ({self.num_nodes},3)"
+        )

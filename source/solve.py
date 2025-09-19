@@ -53,50 +53,52 @@ class BEMSolver:
         return A
 
     def solve_direct(self,
-                     bc_type: Literal["Dirichlet", "Neumann"],
-                     bc_values: np.ndarray,
                      matrices: dict[str, np.ndarray],
-                     rho0: float | None = None,
-                     c0: float | None = None) -> np.ndarray:
+                     bc_type: Literal["Dirichlet", "Neumann"] = "Neumann",
+                     bc_values: np.ndarray | None = None,) -> np.ndarray:
         """
         Solve for the unknown boundary quantity.
 
         Args:
+            matrices (dict[str, np.ndarray]): Operator matrices (``S``, ``D``,
+                ``Kp``, ``N``).
             bc_type (Literal["Dirichlet","Neumann"]): Which data is prescribed.
                 - "Dirichlet": known acoustic potential φ on Γ.
                 - "Neumann": known normal velocity ∂φ/∂n on Γ.
             bc_values (np.ndarray): Prescribed boundary data at nodes,
                 shape (num_nodes,).
-            matrices (dict[str, np.ndarray]): Operator matrices (``S``, ``D``,
-                ``Kp``, ``N``).
-            rho0 (float, optional): Fluid density [kg/m³]. Defaults to 
-                mesh.rho0.
-            c0 (float, optional): Speed of sound [m/s]. Defaults to mesh.c0.
 
         Returns:
             np.ndarray: Solution vector for the unknown boundary quantity
             at mesh nodes.
         """
-        rho = rho0 or self.mesh.rho0
-        c = c0 or self.mesh.c0
+        if bc_values is None:
+            try:
+                bc_values = self.mesh.velocity_BC
+            except AttributeError:
+                raise ValueError("No boundary condition values provided.")
 
         if bc_type == "Dirichlet":
             # Dirichlet given: φ known, ∂φ/∂n unknown
             # BIE:  0.5*φ = D φ - S q
+            self.potential_BC = bc_values
             phi = bc_values
             A = -matrices["S"]
             rhs = 0.5 * phi - matrices["D"] @ phi
             sol = np.linalg.solve(A, rhs)     # q = ∂φ/∂n
+            self.velocity_BC = sol
             return sol
 
         if bc_type == "Neumann":
             # Neumann given: q = ∂φ/∂n known, solve for φ
+            self.velocity_BC = bc_values
             q = bc_values
             # C = np.diag(self.mesh.jump_coefficients)
             C = 0.5 * np.eye(self.mesh.num_nodes)
             A = matrices["D"] - C
             rhs = matrices["S"] @ q
             sol = np.linalg.solve(A, rhs)
+            self.potential_BC = sol
             return sol
 
         raise ValueError("bc_type must be 'Dirichlet' or 'Neumann'")
@@ -187,8 +189,8 @@ class BEMSolver:
     
     def evaluate_field(self,
                        field_points: np.ndarray,
-                       phi: np.ndarray | None,
-                       q: np.ndarray | None,
+                       phi: np.ndarray | None = None,
+                       q: np.ndarray | None = None,
                        quad_order: int = 3) -> np.ndarray:
         """
         Evaluate the potential at domain points using boundary solution.
@@ -205,6 +207,22 @@ class BEMSolver:
         Returns:
             np.ndarray: Complex potential at field points, shape (M,).
         """
+        if phi is None:
+            try: 
+                phi = self.potential_BC
+            except AttributeError:
+                raise ValueError("Boundary potential not found. Provide as " \
+                "Dirichlet BC or run solve_direct to compute from Neumann " \
+                "boundary conditions.")
+            
+        if q is None:
+            try:
+                q = self.velocity_BC
+            except AttributeError:
+                raise ValueError("Boundary normal derivative not found. " \
+                "Provide as Neumann BC or run solve_direct to compute from " \
+                "Dirichlet boundary conditions.")
+
         xi_eta, w = standard_triangle_quad(quad_order)
         u = np.zeros(field_points.shape[0], dtype=complex)
 
