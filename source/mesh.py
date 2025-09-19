@@ -131,7 +131,8 @@ class Mesh:
     
     def compute_jump_coefficients(self) -> np.ndarray:
         """
-        Compute jump coefficients C(x) for the double-layer operator.
+        Compute jump coefficients C(x) for the double-layer operator. Uses the
+        Van Oosterom and Strackee method to compute the solid angle.
 
         For each node, compute the interior solid angle Ω(x) subtended by
         the adjacent triangular elements, then set
@@ -146,11 +147,11 @@ class Mesh:
         """
         coeff = np.zeros(self.num_nodes, dtype=float)
 
-        for node_idx in range(self.num_nodes):
-            elems = self.node_in_el[node_idx]
-            # x0 = self.mesh_nodes[node_idx]
-            # n0 = self.node_n_hat[node_idx]
-            # obs = x0 + 1e-9 * n0  # Slightly offset observation point
+        for i in range(self.num_nodes):
+            elems = self.node_in_el[i]
+            x0 = self.mesh_nodes[i]
+            n0 = self.node_n_hat[i]
+            obs = x0 + 1e-6 * n0
 
             solid_angle = 0.0
             for e in elems:
@@ -158,31 +159,26 @@ class Mesh:
                 v1 = self.mesh_nodes[self.mesh_elements[e, 1]]
                 v2 = self.mesh_nodes[self.mesh_elements[e, 2]]
 
-                # Move to vectors from x0
-                r0 = v0
-                r1 = v1
-                r2 = v2
+                r0 = v0 - obs
+                r1 = v1 - obs
+                r2 = v2 - obs
 
-                # Norms
                 a = np.linalg.norm(r0)
                 b = np.linalg.norm(r1)
                 c = np.linalg.norm(r2)
-
-                # Triple product (6× volume of tetrahedron)
                 triple = np.dot(r0, np.cross(r1, r2))
+                denom = (a*b*c
+                        + np.dot(r0, r1)*c
+                        + np.dot(r1, r2)*a
+                        + np.dot(r2, r0)*b)
 
-                denom = (a * b * c +
-                         np.dot(r0, r1) * c +
-                         np.dot(r1, r2) * a +
-                         np.dot(r2, r0) * b)
-
-                # sign = np.sign(np.dot(n0, np.cross(v1 - v0, v2 - v0)))
                 angle = 2.0 * np.arctan2(triple, denom)
                 solid_angle += angle
 
-            coeff[node_idx] = solid_angle / (4.0 * np.pi)
+            coeff[i] = abs(solid_angle) / (4.0 * np.pi)
 
         self.jump_coefficients = coeff
+        return coeff
 
     def project_velocity_bc(self) -> None:
         """Project vector velocity boundary data onto the mesh normals.

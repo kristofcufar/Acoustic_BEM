@@ -28,55 +28,64 @@ class BEMSolver:
         self.assembler = assembler
         self.mesh = assembler.mesh
 
-    def assemble_matrices(self,
-                          formulation: Literal["collocation", 
-                                               "galerkin"] = "collocation"
+    def assemble_matrices(self, 
+                          ops: tuple[str, ...] = ("S","D","Kp","N"),
                           ) -> dict[str, np.ndarray]:
         """
-        Assemble all operator matrices.
+        Assemble selected operator matrices.
 
         Args:
-            formulation (Literal["collocation","galerkin"], optional):
-                Which formulation to use. Currently only "collocation"
-                is implemented.
+            ops (tuple[str, ...]): Any subset of {"S","D","Kp","N"}.
 
         Returns:
-            dict[str, np.ndarray]: Dictionary with matrices ``S``, ``D``,
-            ``Kp``, ``N``.
+            dict[str, np.ndarray]: Assembled matrices.
         """
-        if formulation != "collocation":
-            raise NotImplementedError("Galerkin support coming soon.")
-
-        A = {}
-        for op in ("S", "D", "Kp", "N"):
+        A: dict[str, np.ndarray] = {}
+        for op in ops:
             A[op] = self.assembler.assemble(op)
         return A
 
     def solve_direct(self,
-                     matrices: dict[str, np.ndarray],
+                     matrices: dict[str, np.ndarray] | None = None,
                      bc_type: Literal["Dirichlet", "Neumann"] = "Neumann",
-                     bc_values: np.ndarray | None = None,) -> np.ndarray:
+                     bc_values: np.ndarray | None = None,
+                     jump_coeff: np.ndarray | None = None) -> np.ndarray:
         """
         Solve for the unknown boundary quantity.
 
         Args:
-            matrices (dict[str, np.ndarray]): Operator matrices (``S``, ``D``,
-                ``Kp``, ``N``).
+            matrices (dict[str, np.ndarray] | None): Pre-assembled operator 
+                matrices {"S","D"}. If None, assembles them.
             bc_type (Literal["Dirichlet","Neumann"]): Which data is prescribed.
                 - "Dirichlet": known acoustic potential φ on Γ.
                 - "Neumann": known normal velocity ∂φ/∂n on Γ.
             bc_values (np.ndarray): Prescribed boundary data at nodes,
                 shape (num_nodes,).
+            jump_coeff (np.ndarray | None): Jump coefficients at nodes,
+                shape (num_nodes,). If None, uses the mesh's jump_coefficients
+                attribute (based on solid angle) if it exists, otherwise 
+                defaults to 0.5.
 
         Returns:
             np.ndarray: Solution vector for the unknown boundary quantity
             at mesh nodes.
         """
+        if matrices is None:
+            matrices = self.assemble_matrices(ops=("S","D"))
+
         if bc_values is None:
             try:
                 bc_values = self.mesh.velocity_BC
             except AttributeError:
                 raise ValueError("No boundary condition values provided.")
+            
+        if jump_coeff is None:
+            try:
+                C = np.diag(self.mesh.jump_coefficients)
+            except AttributeError:
+                C = 0.5 * np.eye(self.mesh.num_nodes)
+        else:
+            C = np.diag(jump_coeff)
 
         if bc_type == "Dirichlet":
             # Dirichlet given: φ known, ∂φ/∂n unknown
@@ -104,12 +113,12 @@ class BEMSolver:
         raise ValueError("bc_type must be 'Dirichlet' or 'Neumann'")
     
     def solve_burton_miller(self,
-                            bc_type: Literal["Dirichlet", "Neumann"],
-                            bc_values: np.ndarray,
-                            matrices: dict[str, np.ndarray],
+                            matrices: dict[str, np.ndarray] | None = None,
+                            bc_type: Literal["Dirichlet", 
+                                             "Neumann"] = "Neumann",
+                            bc_values: np.ndarray | None = None,
+                            jump_coeff: np.ndarray | None = None,
                             alpha: float | None = None,
-                            use_jump: Literal["constant", 
-                                              "mesh"] = "constant"
                             ) -> np.ndarray:
         """
         Solve the BIE via the Burton–Miller combined formulation.
@@ -133,34 +142,46 @@ class BEMSolver:
             [-S + i α K'] q = [C - D - i α N] φ
 
         Args:
-            bc_type (Literal["Dirichlet","Neumann"]): Type of prescribed 
-                boundary data.
-                "Dirichlet" → known potential φ on Γ; returns q.
-                "Neumann"   → known normal derivative q on Γ; returns φ.
-            bc_values (np.ndarray): Prescribed nodal data (shape (num_nodes,)).
-            matrices (dict[str, np.ndarray]): Operator matrices 
-                {"S","D","Kp","N"}.
-            alpha (float | None): Coupling parameter α. If None, 
-                default alpha = i/max(self.mesh.k, 1.0).
-            use_jump ({"constant","mesh","auto"}): How to build the jump matrix 
-                C.
-                - "constant": C = 0.5·I
-                - "mesh":     C = diag(self.mesh.jump_coeff)
+            matrices (dict[str, np.ndarray] | None): Pre-assembled operator 
+                matrices {"S","D","Kp","N"}. If None, assembles them.
+            bc_type (Literal["Dirichlet","Neumann"]): Which data is prescribed.
+                - "Dirichlet": known acoustic potential φ on Γ.
+                - "Neumann": known normal velocity ∂φ/∂n on Γ.
+            bc_values (np.ndarray): Prescribed boundary data at nodes,
+                shape (num_nodes,).
+            jump_coeff (np.ndarray | None): Jump coefficients at nodes,
+                shape (num_nodes,). If None, uses the mesh's jump_coefficients
+                attribute (based on solid angle) if it exists, otherwise 
+                defaults to 0.5.
+            alpha (float | None): Coupling parameter α. If None, defaults to 
+                α = max(k,1) and the combination uses i/α (i.e., i/k when α=k).
 
         Returns:
             np.ndarray: Solution vector (φ for Neumann input, 
                 or q for Dirichlet input).
         """
+
+        if matrices is None:
+            matrices = self.assemble_matrices(ops=("S","D","Kp","N"))
+
+        if bc_values is None:
+            try:
+                bc_values = self.mesh.velocity_BC
+            except AttributeError:
+                raise ValueError("No boundary condition values provided.")
+
         S = matrices["S"]
         D = matrices["D"]
         Kp = matrices["Kp"]
         N  = matrices["N"]
 
-        # Jump term C
-        if use_jump == "mesh" and hasattr(self.mesh, "jump_coeff"):
-            C = np.diag(self.mesh.jump_coeff.astype(complex))
+        if jump_coeff is None:
+            try:
+                C = np.diag(self.mesh.jump_coefficients)
+            except AttributeError:
+                C = 0.5 * np.eye(self.mesh.num_nodes)
         else:
-            C = 0.5 * np.eye(self.mesh.num_nodes, dtype=complex)
+            C = np.diag(jump_coeff)
 
         if alpha is None:
             alpha = max(float(self.mesh.k), 1.0)
@@ -170,19 +191,23 @@ class BEMSolver:
         if bc_type == "Neumann":
             # Given q, solve for φ:
             # [(D - C) + i α N] φ = [S + i α K'] q
+            self.velocity_BC = bc_values
             q = bc_values.astype(complex, copy=False)
             A = (D - C) + ialpha * N
             rhs = (S + ialpha * Kp) @ q
             phi = np.linalg.solve(A, rhs)
+            self.potential_BC = phi
             return phi
 
         if bc_type == "Dirichlet":
             # Given φ, solve for q:
             # [-S + i α K'] q = [C - D - i α N] φ
+            self.potential_BC = bc_values
             phi = bc_values.astype(complex, copy=False)
             A = (-S) + ialpha * Kp
             rhs = (C - D - ialpha * N) @ phi
             q = np.linalg.solve(A, rhs)
+            self.velocity_BC = q
             return q
 
         raise ValueError("bc_type must be 'Dirichlet' or 'Neumann'")
