@@ -174,7 +174,7 @@ def d2G_dn_x_dn_y(r_hat: np.ndarray,
             second normal derivative of the Green's function with respect to 
             both x and y.
     """
-
+    r = np.where(r == 0, 1e-16, r)  # Avoid division by zero
     # f'(r) and f''(r)
     dGr = dG_dr(r, G_vals, k)
     d2Gr = d2G_dr2(r, G_vals, k)

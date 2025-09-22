@@ -102,8 +102,6 @@ class BEMSolver:
             # Neumann given: q = ∂φ/∂n known, solve for φ
             self.velocity_BC = bc_values
             q = bc_values
-            # C = np.diag(self.mesh.jump_coefficients)
-            C = 0.5 * np.eye(self.mesh.num_nodes)
             A = matrices["D"] - C
             rhs = matrices["S"] @ q
             sol = np.linalg.solve(A, rhs)
@@ -193,7 +191,7 @@ class BEMSolver:
             # [(D - C) + i α N] φ = [S + i α K'] q
             self.velocity_BC = bc_values
             q = bc_values.astype(complex, copy=False)
-            A = (D - C) + ialpha * N
+            A = (D + C) + ialpha * N
             rhs = (S + ialpha * Kp) @ q
             phi = np.linalg.solve(A, rhs)
             self.potential_BC = phi
