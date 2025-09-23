@@ -410,3 +410,37 @@ def telles_cubic_1d(u: np.ndarray,
         return u.copy(), np.ones_like(u)
 
     return u_telles, du_telles_du
+
+def barycentric_projection(x: np.ndarray,
+                           v0: np.ndarray,
+                           e1: np.ndarray,
+                           e2: np.ndarray,
+                           clamp: bool = True,
+                           ) -> tuple[float, float]:
+    """
+    Project point x onto the plane of the triangle (v0, v0+e1, v0+e2)
+    and express it in reference barycentric-like coords (xi, eta).
+
+    Returns:
+        (xi, eta) with xi, eta >= 0 and xi + eta <= 1 if clamp=True.
+        If the 2x2 metric is singular/near-singular, returns (1/3, 1/3).
+    """
+    b = x - v0
+    M = np.array([[np.dot(e1, e1), np.dot(e1, e2)],
+                  [np.dot(e2, e1), np.dot(e2, e2)]], dtype=float)
+    rhs = np.array([np.dot(b, e1), np.dot(b, e2)], dtype=float)
+    
+    try:
+        xi, eta = np.linalg.solve(M, rhs)
+    except np.linalg.LinAlgError:
+        xi, eta = 1.0/3.0, 1.0/3.0
+
+    if clamp:
+        xi = max(0.0, xi)
+        eta = max(0.0, eta)
+        s = xi + eta
+        if s > 1.0 and s > 0.0:
+            xi /= s
+            eta /= s
+
+    return float(xi), float(eta)

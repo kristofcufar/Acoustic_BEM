@@ -5,7 +5,8 @@ from source.kernels import G, dG_dn_y, dG_dr, r_vec
 from source.quadrature import (standard_triangle_quad, 
                                map_to_physical_triangle, 
                                shape_functions_P1)
-from source.matrix_assembly import CollocationAssembler
+from source.matrix_assembly import (CollocationAssembler, 
+                                    GalerkinAssembler)
 
 
 class BEMSolver:

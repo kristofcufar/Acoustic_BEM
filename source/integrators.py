@@ -1,9 +1,10 @@
 import numpy as np
-from typing import Tuple, Literal, Optional
 from source.kernels import r_vec, G, dG_dr, dG_dn_y, dG_dn_x, d2G_dn_x_dn_y
-from source.quadrature import (standard_triangle_quad, subdivide_triangle_quad,
-                       telles_rule, duffy_rule, map_to_physical_triangle_batch,
-                       shape_functions_P1)
+from source.quadrature import (standard_triangle_quad, 
+                               subdivide_triangle_quad, 
+                               map_to_physical_triangle_batch, 
+                               shape_functions_P1,
+                               shape_function_gradients_P1)
 
 from source.mesh import Mesh
 
@@ -239,11 +240,6 @@ class ElementIntegratorCollocation:
 
         Returns:
             Local vectors for each triangle, shape (K, 3).
-
-        Note:
-            This implementation assumes the mesh has precomputed inverse metric 
-                tensors.
-            For a more general implementation, compute these on the fly.
         """
         K = len(y_v0)
         y_phys, a2 = map_to_physical_triangle_batch(xi_eta, y_v0, y_e1, y_e2)
@@ -301,38 +297,14 @@ class ElementIntegratorGalerkin:
     """
 
     def __init__(self,
-                 k: float,
-                 regular_quad_order: int = 3,
-                 near_singular_levels: int = 2,
-                 singular_n_leg: int = 8,
-                 near_singular_threshold: float = 2.0):
+                 k: float,):
         """
         Initialize the Galerkin element–element integrator.
 
         Args:
             k (float): Wavenumber for Helmholtz kernel.
-            regular_quad_order (int): Quadrature order for regular integrals.
-            near_singular_levels (int): Number of subdivision levels for near-
-                singular integrals.
-            singular_n_leg (int): Number of Gauss-Legendre points for singular
-                integrals.
-            near_singular_threshold (float): Distance threshold for near-sing.
-                detection (in terms of element characteristic size).
-            singular_threshold (float): Distance threshold for singular
-                detection (in terms of element characteristic size).
         """
         self.k = k
-        self.regular_quad_order = regular_quad_order
-        self.near_singular_levels = near_singular_levels
-        self.singular_n_leg = singular_n_leg
-        self.near_singular_threshold = near_singular_threshold
-
-        self.xi_eta_regular, self.w_regular = \
-            standard_triangle_quad(regular_quad_order)
-        self.xi_eta_near, self.w_near = subdivide_triangle_quad(
-            self.xi_eta_regular, self.w_regular, levels=near_singular_levels
-        )
-
         self._dtype = np.complex128
 
     def single_layer_block_P1P1(self,
@@ -529,10 +501,8 @@ class ElementIntegratorGalerkin:
                                 xi_eta_y: np.ndarray, w_y: np.ndarray,
                                 ) -> np.ndarray:
         """
-        3x3 Galerkin hypersingular block:
-
-        N_ij = ∬ [ ∇_Γ φ_i(x)·∇_Γ φ_j(y) + k² (n_x·n_y) φ_i(x)φ_j(y) ] G(x,y) 
-        dΓ_x dΓ_y
+        3x3 Galerkin hypersingular block with direct approach:
+        N_ij = ∬ ∂²G/(∂n_x∂n_y) φ_i(x)φ_j(y) dΓ_x dΓ_y
 
         Args:
             mesh (Mesh): Mesh object with v0, e1, e2, elements, normals
@@ -589,5 +559,115 @@ class ElementIntegratorGalerkin:
         L = (Nx * wX[:, None]).astype(self._dtype, copy=False) 
         R = (Ny * wY[:, None]).astype(self._dtype, copy=False) 
         B = np.einsum("qi, qk, kj -> ij", L, d2Gxy, R, optimize=True) 
+
+        return B
+    
+    def hypersingular_block_P1P1_reg(self, mesh, ex, ey,
+                                    xi_eta_x, w_x, xi_eta_y, w_y):
+        """
+        3x3 Galerkin hypersingular block with regularization:
+        N_ij = ∬ [ ∇_Γ φ_i(x)·∇_Γ φ_j(y) + 
+            k² (n_x·n_y) φ_i(x)φ_j(y) ] G(x,y)dΓ_x dΓ_y
+
+        Args:
+            mesh (Mesh): Mesh object with v0, e1, e2, elements, normals
+                attributes.
+            ex (int): Index of observation element.
+            ey (int): Index of source element.
+            xi_eta_x (np.ndarray): Quadrature points for x element, shape
+                (Qx, 2).
+            w_x (np.ndarray): Quadrature weights for x element, shape (Qx,).
+            xi_eta_y (np.ndarray): Quadrature points for y element, shape
+                (Qy, 2).
+            w_y (np.ndarray): Quadrature weights for y element, shape (Qy,).
+
+        Returns:
+            np.ndarray: 3x3 local Galerkin block as a numpy array.
+        """
+        v0x, e1x, e2x = mesh.v0[ex], \
+                        mesh.e1[ex], \
+                        mesh.e2[ex]
+        v0y, e1y, e2y = mesh.v0[ey], \
+                        mesh.e1[ey], \
+                        mesh.e2[ey]
+        
+        nx, ny = mesh.n_hat[ex], mesh.n_hat[ey]
+
+        xq, a2x = map_to_physical_triangle_batch(xi_eta_x, 
+                                                 v0x[None], 
+                                                 e1x[None], 
+                                                 e2x[None])
+        yq, a2y = map_to_physical_triangle_batch(xi_eta_y, 
+                                                 v0y[None], 
+                                                 e1y[None], 
+                                                 e2y[None])
+        xq, yq = xq[0], yq[0]
+        wX = (w_x * float(a2x[0])).astype(self._dtype, copy=False)
+        wY = (w_y * float(a2y[0])).astype(self._dtype, copy=False)
+
+        rxy = r_vec(xq[:, None, :], yq[None, :, :])[1]
+        Gxy = G(rxy, self.k).astype(self._dtype, copy=False)
+
+        # 1) J0 = ∬ G dΓx dΓy  (no shape functions)
+        J0 = np.einsum("q,k,qk->", wX, wY, Gxy, optimize=True)
+
+        # 2) k^2 (nx·ny) * S_block  (reuse your single-layer block)
+        Sblk = self.single_layer_block_P1P1(mesh, ex, ey, 
+                                            xi_eta_x, w_x, 
+                                            xi_eta_y, w_y)
+        term2 = (self.k**2) * np.dot(nx, ny) * Sblk
+
+        # 3) (∇φ_i · ∇φ_j) * J0  (P1 grads are constant per element)
+        dN_ref = shape_function_gradients_P1()
+        Jx = np.stack([e1x, e2x], axis=-1)
+        Jy = np.stack([e1y, e2y], axis=-1)
+
+        Gx = np.linalg.inv(Jx.T @ Jx)
+        Gy = np.linalg.inv(Jy.T @ Jy)
+        gradx = Jx @ Gx @ dN_ref.T
+        grady = Jy @ Gy @ dN_ref.T 
+
+        gamma = gradx.T @ grady
+        term1 = (J0 * gamma).astype(self._dtype, copy=False)
+
+        return term1 + term2
+    
+    def jump_block_P1P1(self,
+                        mesh: Mesh,
+                        ex: int,
+                        xi_eta_x: np.ndarray,
+                        w_x: np.ndarray,
+                       ) -> np.ndarray:
+        """
+        3x3 local Galerkin block for the jump term:
+            C_ij = ∫_Γ  C(x) φ_i(x) φ_j(x) dΓ_x
+
+        Args:
+            mesh: Mesh with element geometry and (optionally) 
+                jump_coefficients.
+            ex:   Index of the (single) element to integrate over.
+            xi_eta_x, w_x: quadrature rule on the reference triangle.
+
+        Returns:
+            3x3 complex block (dtype matches self._dtype).
+        """
+        v0x, e1x, e2x = mesh.v0[ex], mesh.e1[ex], mesh.e2[ex]
+        xq, a2x = map_to_physical_triangle_batch(
+            xi_eta_x, v0x[None, :], e1x[None, :], e2x[None, :]
+        )
+
+        a2x = float(a2x[0])
+        wX  = (w_x * a2x).astype(self._dtype, copy=False)
+
+        Nx = shape_functions_P1(xi_eta_x)
+
+        node_ids = mesh.mesh_elements[ex]
+        if not hasattr(mesh, "jump_coefficients"):
+            c_val = np.full(3, 0.5, dtype=self._dtype)
+        else:
+            c_val = mesh.jump_coefficients[node_ids]
+
+        C = Nx @ c_val
+        B = Nx.T @ ((C * wX)[:, None] * Nx)
 
         return B
