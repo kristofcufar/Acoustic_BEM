@@ -211,6 +211,84 @@ class ElementIntegratorCollocation:
         
         return np.sum(integrand, axis=1)
     
+    def hypersingular_batch_reg(self,
+                                x: np.ndarray,
+                                x_normal: np.ndarray,
+                                y_v0: np.ndarray,
+                                y_e1: np.ndarray,
+                                y_e2: np.ndarray,
+                                y_normals: np.ndarray,
+                                xi_eta: np.ndarray,
+                                w: np.ndarray) -> np.ndarray:
+        """
+        Compute hypersingular integrals using Maue's identity.
+        
+        Uses the identity:
+        ∫_T ∂²G/(∂n_x∂n_y) N_j dS = 
+            k² ∫_T (n_x·n_y) G N_j dS + ∫_T ∇_y G · ∇_Γ N_j dS
+
+        Args:
+            x: Observation point, shape (3,).
+            x_normal: Normal vector at observation point, shape (3,).
+            y_v0: First vertices of source triangles, shape (K, 3).
+            y_e1: First edge vectors of source triangles, shape (K, 3).
+            y_e2: Second edge vectors of source triangles, shape (K, 3).
+            y_normals: Normal vectors of source triangles, shape (K, 3).
+            xi_eta: Quadrature points in reference triangle, shape (Q, 2).
+            w: Quadrature weights, shape (Q,).
+
+        Returns:
+            Local vectors for each triangle, shape (K, 3).
+
+        Note:
+            This implementation assumes the mesh has precomputed inverse metric 
+                tensors.
+            For a more general implementation, compute these on the fly.
+        """
+        K = len(y_v0)
+        y_phys, a2 = map_to_physical_triangle_batch(xi_eta, y_v0, y_e1, y_e2)
+        w_phys = w[None, :] * a2[:, None]
+        
+        nx_dot_ny = np.einsum("i,ki->k", x_normal, y_normals)
+        
+        _, r_norm, r_hat = r_vec(x[None, None, :], y_phys)
+        G_vals = G(r_norm, self.k)
+        N_vals = shape_functions_P1(xi_eta)
+        
+        part1 = np.einsum("kq,k,qj,kq->kj", 
+                          G_vals, nx_dot_ny, N_vals, w_phys) * (self.k**2)
+        
+        dG_dr_vals = dG_dr(r_norm, G_vals, self.k)
+        grad_y_G = -dG_dr_vals[:, :, None] * r_hat
+        
+        dN_ref = np.array([[-1.0, -1.0],
+                          [ 1.0,  0.0],
+                          [ 0.0,  1.0]], dtype=np.float64)
+        
+        G11 = np.einsum("ki,ki->k", y_e1, y_e1)
+        G12 = np.einsum("ki,ki->k", y_e1, y_e2)
+        G22 = np.einsum("ki,ki->k", y_e2, y_e2)
+        
+        det_G = G11 * G22 - G12 * G12
+        det_G = np.where(np.abs(det_G) < 1e-14, 1e-14, det_G)
+        
+        Ginv = np.zeros((K, 2, 2))
+        Ginv[:, 0, 0] = G22 / det_G
+        Ginv[:, 0, 1] = -G12 / det_G
+        Ginv[:, 1, 0] = -G12 / det_G
+        Ginv[:, 1, 1] = G11 / det_G
+        
+        g1 = Ginv[:, 0, 0, None] * y_e1 + Ginv[:, 0, 1, None] * y_e2
+        g2 = Ginv[:, 1, 0, None] * y_e1 + Ginv[:, 1, 1, None] * y_e2 
+        g = np.stack([g1, g2], axis=1)
+        
+        grad_N = np.einsum("kao,ja->kjo", g, dN_ref)
+        
+        dot_products = np.einsum("kqo,kjo->kjq", grad_y_G, grad_N)
+        part2 = np.einsum("kjq,kq->kj", dot_products, w_phys)
+        
+        return part1 + part2
+    
 
 class ElementIntegratorGalerkin:
     """

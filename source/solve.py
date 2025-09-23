@@ -29,13 +29,13 @@ class BEMSolver:
         self.mesh = assembler.mesh
 
     def assemble_matrices(self, 
-                          ops: tuple[str, ...] = ("S","D","Kp","N"),
+                          ops: tuple[str, ...] = ("S","D","Kp","N", "NReg"),
                           ) -> dict[str, np.ndarray]:
         """
         Assemble selected operator matrices.
 
         Args:
-            ops (tuple[str, ...]): Any subset of {"S","D","Kp","N"}.
+            ops (tuple[str, ...]): Any subset of {"S","D","Kp","N", "NReg"}.
 
         Returns:
             dict[str, np.ndarray]: Assembled matrices.
@@ -152,7 +152,7 @@ class BEMSolver:
                 attribute (based on solid angle) if it exists, otherwise 
                 defaults to 0.5.
             alpha (float | None): Coupling parameter α. If None, defaults to 
-                α = max(k,1) and the combination uses i/α (i.e., i/k when α=k).
+                α = 1j/max(k,1).
 
         Returns:
             np.ndarray: Solution vector (φ for Neumann input, 
@@ -182,17 +182,20 @@ class BEMSolver:
             C = np.diag(jump_coeff)
 
         if alpha is None:
-            alpha = max(float(self.mesh.k), 1.0)
-
-        ialpha = 1j / alpha
+            ialpha = 1j / max(float(self.mesh.k), 1.0)
+        else:
+            if not np.iscomplexobj(alpha):
+                ialpha = 1j * alpha
+            else:
+                ialpha = alpha
 
         if bc_type == "Neumann":
             # Given q, solve for φ:
             # [(D - C) + i α N] φ = [S + i α K'] q
             self.velocity_BC = bc_values
             q = bc_values.astype(complex, copy=False)
-            A = (D + C) + ialpha * N
-            rhs = (S + ialpha * Kp) @ q
+            A = (D - C) + ialpha * N
+            rhs = (S - ialpha * Kp) @ q
             phi = np.linalg.solve(A, rhs)
             self.potential_BC = phi
             return phi

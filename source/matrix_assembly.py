@@ -48,13 +48,13 @@ class CollocationAssembler:
         Assemble the collocation matrix for a boundary operator.
 
         Args:
-            operator (str): One of ``{"S", "D", "Kp", "N"}``.
+            operator (str): One of ``{"S", "D", "Kp", "N", "NReg"}``.
 
         Returns:
             np.ndarray: Dense matrix of shape (num_nodes, num_nodes) containing
             the collocation coefficients for the selected operator.
         """
-        if operator not in {"S", "D", "Kp", "N"}:
+        if operator not in {"S", "D", "Kp", "N", "NReg"}:
             raise ValueError(f"Unknown operator {operator}")
 
         A = np.zeros((self.Nn, self.Nn), dtype=np.complex128)
@@ -132,7 +132,8 @@ class CollocationAssembler:
         Dispatch to the correct integrator method.
 
         Args:
-            operator (str): Operator key (``S``, ``D``, ``Kp``, or ``N``).
+            operator (str): Operator key (``S``, ``D``, ``Kp``, ``N`` or 
+                "NReg").
             x (np.ndarray): Collocation point, shape (3,).
             n_x (np.ndarray): Outward normal at the collocation point, shape 
                 (3,).
@@ -172,6 +173,7 @@ class CollocationAssembler:
                 xi_eta,
                 w,
             )
+        
         if operator == "N":
             return self.integrator.hypersingular_batch(
                 x,
@@ -183,6 +185,19 @@ class CollocationAssembler:
                 xi_eta,
                 w,
             )
+        
+        if operator == "NReg":
+            return self.integrator.hypersingular_batch_reg(
+                x,
+                n_x,
+                self.mesh.v0[elem_idx],
+                self.mesh.e1[elem_idx],
+                self.mesh.e2[elem_idx],
+                self.mesh.n_hat[elem_idx],
+                xi_eta,
+                w,
+            )
+        
         raise ValueError(f"Unsupported operator: {operator}")
 
     @staticmethod
