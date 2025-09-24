@@ -17,17 +17,21 @@ class BEMSolver:
     solution of the linear system.
 
     Attributes:
-        assembler (CollocationAssembler): Assembler object for building matrices.
+        assembler (CollocationAssembler | GalerkinAssembler): Assembler object 
+            for building matrices.
     """
 
-    def __init__(self, assembler: CollocationAssembler):
+    def __init__(self, assembler: CollocationAssembler | GalerkinAssembler):
         """Initialize the solver.
 
         Args:
-            assembler (CollocationAssembler): Collocation or Galerkin assembler.
+            assembler (CollocationAssembler | GalerkinAssembler): Collocation 
+                or Galerkin assembler.
         """
         self.assembler = assembler
         self.mesh = assembler.mesh
+        self.is_galerkin = isinstance(assembler, GalerkinAssembler)
+
 
     def assemble_matrices(self, 
                           ops: tuple[str, ...] = ("S","D","Kp","N", "NReg"),
@@ -80,33 +84,37 @@ class BEMSolver:
             except AttributeError:
                 raise ValueError("No boundary condition values provided.")
             
-        if jump_coeff is None:
-            try:
-                C = np.diag(self.mesh.jump_coefficients)
-            except AttributeError:
-                C = 0.5 * np.eye(self.mesh.num_nodes)
-        else:
-            C = np.diag(jump_coeff)
+        S = matrices["S"]
+        D = matrices["D"]
 
-        if bc_type == "Dirichlet":
-            # Dirichlet given: φ known, ∂φ/∂n unknown
-            # BIE:  0.5*φ = D φ - S q
-            self.potential_BC = bc_values
+        if self.is_galerkin:
+            C = self.assembler.assemble("M")
+
+        else:
+            if jump_coeff is None:
+                try:
+                    C = np.diag(self.mesh.jump_coefficients)
+                except AttributeError:
+                    C = 0.5 * np.eye(self.mesh.num_nodes)
+            else:
+                C = np.diag(jump_coeff)
+
+        if bc_type == "Dirichlet":            
             phi = bc_values
-            A = -matrices["S"]
-            rhs = 0.5 * phi - matrices["D"] @ phi
+            A = -S
+            rhs = 0.5 * phi - D @ phi
             sol = np.linalg.solve(A, rhs)     # q = ∂φ/∂n
             self.velocity_BC = sol
+            self.potential_BC = bc_values
             return sol
 
         if bc_type == "Neumann":
-            # Neumann given: q = ∂φ/∂n known, solve for φ
-            self.velocity_BC = bc_values
             q = bc_values
-            A = matrices["D"] - C
-            rhs = matrices["S"] @ q
+            A = D - C
+            rhs = S @ q
             sol = np.linalg.solve(A, rhs)
             self.potential_BC = sol
+            self.velocity_BC = bc_values
             return sol
 
         raise ValueError("bc_type must be 'Dirichlet' or 'Neumann'")
@@ -174,13 +182,17 @@ class BEMSolver:
         Kp = matrices["Kp"]
         N  = matrices["N"]
 
-        if jump_coeff is None:
-            try:
-                C = np.diag(self.mesh.jump_coefficients)
-            except AttributeError:
-                C = 0.5 * np.eye(self.mesh.num_nodes)
+        if self.is_galerkin:
+            C = self.assembler.assemble("M")
+
         else:
-            C = np.diag(jump_coeff)
+            if jump_coeff is None:
+                try:
+                    C = np.diag(self.mesh.jump_coefficients)
+                except AttributeError:
+                    C = 0.5 * np.eye(self.mesh.num_nodes)
+            else:
+                C = np.diag(jump_coeff)
 
         if alpha is None:
             ialpha = 1j / max(float(self.mesh.k), 1.0)
@@ -191,25 +203,21 @@ class BEMSolver:
                 ialpha = alpha
 
         if bc_type == "Neumann":
-            # Given q, solve for φ:
-            # [(D - C) + i α N] φ = [S + i α K'] q
-            self.velocity_BC = bc_values
             q = bc_values.astype(complex, copy=False)
             A = (D - C) + ialpha * N
             rhs = (S - ialpha * Kp) @ q
             phi = np.linalg.solve(A, rhs)
             self.potential_BC = phi
+            self.velocity_BC = bc_values
             return phi
 
         if bc_type == "Dirichlet":
-            # Given φ, solve for q:
-            # [-S + i α K'] q = [C - D - i α N] φ
-            self.potential_BC = bc_values
             phi = bc_values.astype(complex, copy=False)
             A = (-S) + ialpha * Kp
             rhs = (C - D - ialpha * N) @ phi
             q = np.linalg.solve(A, rhs)
             self.velocity_BC = q
+            self.potential_BC = bc_values
             return q
 
         raise ValueError("bc_type must be 'Dirichlet' or 'Neumann'")

@@ -1,8 +1,6 @@
 import numpy as np
 from source.kernels import r_vec, G, dG_dr, dG_dn_y, dG_dn_x, d2G_dn_x_dn_y
-from source.quadrature import (standard_triangle_quad, 
-                               subdivide_triangle_quad, 
-                               map_to_physical_triangle_batch, 
+from source.quadrature import (map_to_physical_triangle_batch, 
                                shape_functions_P1,
                                shape_function_gradients_P1)
 
@@ -306,35 +304,19 @@ class ElementIntegratorGalerkin:
         """
         self.k = k
         self._dtype = np.complex128
+    
+    def single_layer_block_P1P1_batch(self,
+                                      mesh: Mesh,
+                                      ex: int,
+                                      ey: np.ndarray,
+                                      xi_eta_x: np.ndarray, w_x: np.ndarray,
+                                      xi_eta_y: np.ndarray, w_y: np.ndarray,
+                                      ) -> np.ndarray:
 
-    def single_layer_block_P1P1(self,
-                                mesh: Mesh,
-                                ex: int,
-                                ey: int,
-                                xi_eta_x: np.ndarray, w_x: np.ndarray,
-                                xi_eta_y: np.ndarray, w_y: np.ndarray,
-                                ) -> np.ndarray:
-        """
-        3x3 local Galerkin block for S: ∬ φ_i(x) G(x,y) φ_j(y) dΓ_x dΓ_y.
-
-        Args:
-            mesh (Mesh): Mesh object containing element information.
-            ex (int): Index of observation element.
-            ey (int): Index of source element.
-            xi_eta_x (np.ndarray): Quadrature points for x element, shape
-                (Qx, 2).
-            w_x (np.ndarray): Quadrature weights for x element, shape (Qx,).
-            xi_eta_y (np.ndarray): Quadrature points for y element, shape
-                (Qy, 2).
-            w_y (np.ndarray): Quadrature weights for y element, shape (Qy,).
-
-        Returns:
-            np.ndarray: 3x3 local Galerkin block as a numpy array.
-        """
         v0x, e1x, e2x = mesh.v0[ex], \
                         mesh.e1[ex], \
                         mesh.e2[ex]
-
+        
         v0y, e1y, e2y = mesh.v0[ey], \
                         mesh.e1[ey], \
                         mesh.e2[ey]
@@ -342,97 +324,73 @@ class ElementIntegratorGalerkin:
         xq, a2x = map_to_physical_triangle_batch(
             xi_eta_x, v0x[None, :], e1x[None, :], e2x[None, :])
         
-        yq, a2y = map_to_physical_triangle_batch(
-            xi_eta_y, v0y[None, :], e1y[None, :], e2y[None, :])
-        
         xq = xq[0]
-        yq = yq[0]
+        
+        yq, a2y = map_to_physical_triangle_batch(
+            xi_eta_y, v0y, e1y, e2y)
 
-        a2x = float(a2x[0])
-        a2y = float(a2y[0])
-
-        wX = (w_x * a2x).astype(self._dtype, copy=False)
-        wY = (w_y * a2y).astype(self._dtype, copy=False)
+        wX = (w_x * float(a2x[0])).astype(self._dtype, copy=False)
+        wY = (w_y[None, :] * a2y[:, None]).astype(self._dtype, copy=False)
 
         Nx = shape_functions_P1(xi_eta_x)
         Ny = shape_functions_P1(xi_eta_y)
 
-        rxy = r_vec(xq[:, None, :], yq[None, :, :])[1]
+        L = (Nx * wX[:, None]).astype(self._dtype, copy=False)
+        R = (Ny[None, :, :] * wY[:, :, None]).astype(self._dtype, copy=False)
+        
+        diff = xq[:, None, None, :] - yq[None, :, :, :]
+        rxy = np.linalg.norm(diff, axis=-1)
         Gxy = G(rxy, self.k).astype(self._dtype, copy=False)
 
-        L = (Nx * wX[:, None]).astype(self._dtype, copy=False) 
-        R = (Ny * wY[:, None]).astype(self._dtype, copy=False)
-        B = np.einsum("qi, qk, kj -> ij", L, Gxy, R, optimize=True)
-        return B
-
-    def double_layer_block_P1P1(self,
-                                mesh,
-                                ex: int,
-                                ey: int,
-                                xi_eta_x: np.ndarray, w_x: np.ndarray,
-                                xi_eta_y: np.ndarray, w_y: np.ndarray,
-                                ) -> np.ndarray:
-        """
-        3x3 local Galerkin block for D: ∬ φ_i(x) ∂G/∂n_y φ_j(y) dΓ_x dΓ_y.
-
-        Args:
-            mesh (Mesh): Mesh object with v0, e1, e2, elements, normals 
-                attributes.
-            ex (int): Index of observation element.
-            ey (int): Index of source element.
-            xi_eta_x (np.ndarray): Quadrature points for x element, shape
-                (Qx, 2).
-            w_x (np.ndarray): Quadrature weights for x element, shape (Qx,).
-            xi_eta_y (np.ndarray): Quadrature points for y element, shape
-                (Qy, 2).
-            w_y (np.ndarray): Quadrature weights for y element, shape (Qy,).
-
-        Returns:
-            np.ndarray: 3x3 local Galerkin block as a numpy array.
-        """
-        v0x, e1x, e2x = mesh.v0[ex], \
-                        mesh.e1[ex], \
+        return np.einsum('qi,qbk,bkj->bij', L, Gxy, R, optimize=True)
+    
+    def double_layer_block_P1P1_batch(self,
+                                      mesh,
+                                      ex: int,
+                                      ey: np.ndarray,
+                                      xi_eta_x: np.ndarray, w_x: np.ndarray,
+                                      xi_eta_y: np.ndarray, w_y: np.ndarray,
+                                      ) -> np.ndarray:
+        v0x, e1x, e2x = mesh.v0[ex],\
+                        mesh.e1[ex],\
                         mesh.e2[ex]
-
-        v0y, e1y, e2y = mesh.v0[ey], \
-                        mesh.e1[ey], \
+        
+        v0y, e1y, e2y = mesh.v0[ey],\
+                        mesh.e1[ey],\
                         mesh.e2[ey]
         
         ny = mesh.n_hat[ey]
-
         xq, a2x = map_to_physical_triangle_batch(
             xi_eta_x, v0x[None, :], e1x[None, :], e2x[None, :])
         
-        yq, a2y = map_to_physical_triangle_batch(
-            xi_eta_y, v0y[None, :], e1y[None, :], e2y[None, :])
-        
         xq = xq[0]
-        yq = yq[0]
 
-        a2x = float(a2x[0])
-        a2y = float(a2y[0])
+        yq, a2y = map_to_physical_triangle_batch(
+            xi_eta_y, v0y, e1y, e2y)
         
-        wX = (w_x * a2x).astype(self._dtype, copy=False)
-        wY = (w_y * a2y).astype(self._dtype, copy=False)
+        wX = (w_x * float(a2x[0])).astype(self._dtype, copy=False)
+        wY = (w_y[None, :] * a2y[:, None]).astype(self._dtype, copy=False)
 
         Nx = shape_functions_P1(xi_eta_x)
         Ny = shape_functions_P1(xi_eta_y)
 
-        rxy, rhat = r_vec(xq[:, None, :], yq[None, :, :])[1:]  
+        L = (Nx * wX[:, None]).astype(self._dtype, copy=False)
+        R = (Ny[None, :, :] * wY[:, :, None]).astype(self._dtype, copy=False)
+
+        diff = xq[:, None, None, :] - yq[None, :, :, :]
+        rxy = np.linalg.norm(diff, axis=-1)
+        rhat = diff / rxy[:, :, :, None]
         Gxy = G(rxy, self.k).astype(self._dtype, copy=False)
         dGr = dG_dr(rxy, Gxy, self.k).astype(self._dtype, copy=False)
-        ny_b = ny[None, None, :]   
-        dGdnY = dG_dn_y(rhat, dGr, ny_b).astype(self._dtype, copy=False) 
+        ndoty = np.einsum('qbk i, b i -> qbk', rhat, ny)
+        K = -dGr * ndoty
 
-        L = (Nx * wX[:, None]).astype(self._dtype, copy=False)
-        R = (Ny * wY[:, None]).astype(self._dtype, copy=False)
-        B = np.einsum("qi, qk, kj -> ij", L, dGdnY, R, optimize=True)
-        return B
+        return np.einsum("qi, qbk, bkj -> bij", L, K, R, optimize=True)
 
-    def adjoint_double_layer_block_P1P1(self,
+    def adjoint_double_layer_block_P1P1_batch(self,
                                         mesh,
                                         ex: int,
-                                        ey: int,
+                                        ey: np.ndarray,
                                         xi_eta_x: np.ndarray, w_x: np.ndarray,
                                         xi_eta_y: np.ndarray, w_y: np.ndarray,
                                     ) -> np.ndarray:
@@ -443,7 +401,7 @@ class ElementIntegratorGalerkin:
             mesh (Mesh): Mesh object with v0, e1, e2, elements, normals
                 attributes.
             ex (int): Index of observation element.
-            ey (int): Index of source element.
+            ey (np.ndarray): Indices of source elements.
             xi_eta_x (np.ndarray): Quadrature points for x element, shape
                 (Qx, 2).
             w_x (np.ndarray): Quadrature weights for x element, shape (Qx,).
@@ -466,104 +424,39 @@ class ElementIntegratorGalerkin:
 
         xq, a2x = map_to_physical_triangle_batch(
             xi_eta_x, v0x[None, :], e1x[None, :], e2x[None, :])
-        
-        yq, a2y = map_to_physical_triangle_batch(
-            xi_eta_y, v0y[None, :], e1y[None, :], e2y[None, :])
-        
-        xq = xq[0]
-        yq = yq[0]
 
-        a2x = float(a2x[0])
-        a2y = float(a2y[0])
+        xq = xq[0]
+
+        yq, a2y = map_to_physical_triangle_batch(
+            xi_eta_y, v0y, e1y, e2y)
         
-        wX = (w_x * a2x).astype(self._dtype, copy=False)
-        wY = (w_y * a2y).astype(self._dtype, copy=False)
+        wX = (w_x * float(a2x[0])).astype(self._dtype, copy=False)
+        wY = (w_y[None, :] * a2y[:, None]).astype(self._dtype, copy=False)
 
         Nx = shape_functions_P1(xi_eta_x)
         Ny = shape_functions_P1(xi_eta_y)
 
-        rxy, rhat = r_vec(xq[:, None, :], yq[None, :, :])[1:]
+        diff = xq[:, None, None, :] - yq[None, :, :, :]
+        rxy = np.linalg.norm(diff, axis=-1)
+        rhat = diff / rxy[:, :, :, None]
         Gxy = G(rxy, self.k).astype(self._dtype, copy=False)
         dGr = dG_dr(rxy, Gxy, self.k).astype(self._dtype, copy=False)
-        nx_b = nx[None, None, :]
-        dGdnX = dG_dn_x(rhat, dGr, nx_b).astype(self._dtype, copy=False)
+        
+        ndotx = np.einsum('qbk i, i -> qbk', rhat, nx)
+        K = dGr * ndotx
 
         L = (Nx * wX[:, None]).astype(self._dtype, copy=False)
-        R = (Ny * wY[:, None]).astype(self._dtype, copy=False)
-        B = np.einsum("qi, qk, kj -> ij", L, dGdnX, R, optimize=True)
-        return B
-
-    def hypersingular_block_P1P1(self,
-                                mesh,
-                                ex: int,
-                                ey: int,
-                                xi_eta_x: np.ndarray, w_x: np.ndarray,
-                                xi_eta_y: np.ndarray, w_y: np.ndarray,
-                                ) -> np.ndarray:
-        """
-        3x3 Galerkin hypersingular block with direct approach:
-        N_ij = ∬ ∂²G/(∂n_x∂n_y) φ_i(x)φ_j(y) dΓ_x dΓ_y
-
-        Args:
-            mesh (Mesh): Mesh object with v0, e1, e2, elements, normals
-                attributes.
-            ex (int): Index of observation element.
-            ey (int): Index of source element.
-            xi_eta_x (np.ndarray): Quadrature points for x element, shape
-                (Qx, 2).
-            w_x (np.ndarray): Quadrature weights for x element, shape (Qx,).
-            xi_eta_y (np.ndarray): Quadrature points for y element, shape
-                (Qy, 2).
-            w_y (np.ndarray): Quadrature weights for y element, shape (Qy,).
-
-        Returns:
-            np.ndarray: 3x3 local Galerkin block as a numpy array.
-        """
-        v0x, e1x, e2x = mesh.v0[ex], \
-                        mesh.e1[ex], \
-                        mesh.e2[ex]
-
-        v0y, e1y, e2y = mesh.v0[ey], \
-                        mesh.e1[ey], \
-                        mesh.e2[ey]
-
-        nx = mesh.n_hat[ex]
-        ny = mesh.n_hat[ey]
-
-        xq, a2x = map_to_physical_triangle_batch(
-            xi_eta_x, v0x[None, :], e1x[None, :], e2x[None, :])
-        
-        yq, a2y = map_to_physical_triangle_batch(
-            xi_eta_y, v0y[None, :], e1y[None, :], e2y[None, :])
-        
-        xq = xq[0]
-        yq = yq[0]
-
-        a2x = float(a2x[0])
-        a2y = float(a2y[0])
-        
-        wX = (w_x * a2x).astype(self._dtype, copy=False)
-        wY = (w_y * a2y).astype(self._dtype, copy=False)
-
-        Nx = shape_functions_P1(xi_eta_x)
-        Ny = shape_functions_P1(xi_eta_y)
-
-        _, rxy, rhat = r_vec(xq[:, None, :], yq[None, :, :]) 
-        Gxy = G(rxy, self.k)
-        nx_b = nx[None, None, :] 
-        ny_b = ny[None, None, :] 
-        d2Gxy = d2G_dn_x_dn_y(r_hat=rhat, r=rxy,
-                            n_x=nx_b, n_y=ny_b,
-                            G_vals=Gxy, k=self.k) 
-        
-        L = (Nx * wX[:, None]).astype(self._dtype, copy=False) 
-        R = (Ny * wY[:, None]).astype(self._dtype, copy=False) 
-        B = np.einsum("qi, qk, kj -> ij", L, d2Gxy, R, optimize=True) 
-
-        return B
+        R = (Ny[None, :, :] * wY[:, :, None]).astype(self._dtype, copy=False)
+        return np.einsum("qi, qbk, bkj -> bij", L, K, R, optimize=True)
     
-    def hypersingular_block_P1P1_reg(self, mesh, ex, ey,
-                                    xi_eta_x, w_x, xi_eta_y, w_y):
+    def hypersingular_block_P1P1_reg_batch(self, 
+                                           mesh: Mesh, 
+                                           ex: int, 
+                                           ey: np.ndarray, 
+                                           xi_eta_x: np.ndarray, 
+                                           w_x: np.ndarray, 
+                                           xi_eta_y: np.ndarray, 
+                                           w_y: np.ndarray) -> np.ndarray:
         """
         3x3 Galerkin hypersingular block with regularization:
         N_ij = ∬ [ ∇_Γ φ_i(x)·∇_Γ φ_j(y) + 
@@ -573,7 +466,7 @@ class ElementIntegratorGalerkin:
             mesh (Mesh): Mesh object with v0, e1, e2, elements, normals
                 attributes.
             ex (int): Index of observation element.
-            ey (int): Index of source element.
+            ey (np.ndarray): Indices of source elements.
             xi_eta_x (np.ndarray): Quadrature points for x element, shape
                 (Qx, 2).
             w_x (np.ndarray): Quadrature weights for x element, shape (Qx,).
@@ -591,44 +484,44 @@ class ElementIntegratorGalerkin:
                         mesh.e1[ey], \
                         mesh.e2[ey]
         
-        nx, ny = mesh.n_hat[ex], mesh.n_hat[ey]
+        nx = mesh.n_hat[ex]
+        ny = mesh.n_hat[ey]
 
-        xq, a2x = map_to_physical_triangle_batch(xi_eta_x, 
-                                                 v0x[None], 
-                                                 e1x[None], 
-                                                 e2x[None])
-        yq, a2y = map_to_physical_triangle_batch(xi_eta_y, 
-                                                 v0y[None], 
-                                                 e1y[None], 
-                                                 e2y[None])
-        xq, yq = xq[0], yq[0]
+        xq, a2x = map_to_physical_triangle_batch(
+            xi_eta_x, v0x[None], e1x[None], e2x[None]
+        )
+        yq, a2y = map_to_physical_triangle_batch(
+            xi_eta_y, v0y, e1y, e2y
+        )
+        xq = xq[0]
+
         wX = (w_x * float(a2x[0])).astype(self._dtype, copy=False)
-        wY = (w_y * float(a2y[0])).astype(self._dtype, copy=False)
+        wY = (w_y[None, :] * a2y[:, None]).astype(self._dtype, copy=False)
 
-        rxy = r_vec(xq[:, None, :], yq[None, :, :])[1]
+        diff = xq[:, None, None, :] - yq[None, :, :, :]
+        rxy = np.linalg.norm(diff, axis=-1)
         Gxy = G(rxy, self.k).astype(self._dtype, copy=False)
 
-        # 1) J0 = ∬ G dΓx dΓy  (no shape functions)
-        J0 = np.einsum("q,k,qk->", wX, wY, Gxy, optimize=True)
-
-        # 2) k^2 (nx·ny) * S_block  (reuse your single-layer block)
-        Sblk = self.single_layer_block_P1P1(mesh, ex, ey, 
+        J0 = np.einsum("q,bk,qbk->b", wX, wY, Gxy, optimize=True)
+        Sblk = self.single_layer_block_P1P1_batch(mesh, ex, ey, 
                                             xi_eta_x, w_x, 
                                             xi_eta_y, w_y)
-        term2 = (self.k**2) * np.dot(nx, ny) * Sblk
+        
+        nxny = np.einsum("i,bi->b", nx, ny)
+        term2 = (self.k**2) * nxny[:, None, None] * Sblk
 
-        # 3) (∇φ_i · ∇φ_j) * J0  (P1 grads are constant per element)
         dN_ref = shape_function_gradients_P1()
-        Jx = np.stack([e1x, e2x], axis=-1)
-        Jy = np.stack([e1y, e2y], axis=-1)
+        Jx = np.stack([e1x, e2x], axis = -1)
+        Jy = np.stack([e1y, e2y], axis = 2)
 
         Gx = np.linalg.inv(Jx.T @ Jx)
-        Gy = np.linalg.inv(Jy.T @ Jy)
-        gradx = Jx @ Gx @ dN_ref.T
-        grady = Jy @ Gy @ dN_ref.T 
+        Gy = np.linalg.inv(np.einsum('bmi,bmj->bij', Jy, Jy, optimize=True))
 
-        gamma = gradx.T @ grady
-        term1 = (J0 * gamma).astype(self._dtype, copy=False)
+        gradx = Jx @ Gx @ dN_ref.T
+        grady = np.einsum('bmi,bij,aj->bma', Jy, Gy, dN_ref, optimize=True)
+
+        gamma = np.einsum('im,bmj->bij', gradx.T, grady, optimize=True)
+        term1 = (J0[:, None, None] * gamma).astype(self._dtype, copy=False)
 
         return term1 + term2
     

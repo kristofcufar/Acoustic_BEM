@@ -1,0 +1,94 @@
+*** Begin Patch
+*** Update File: source/matrix_assembly.py
+@@
+-                if len(near_set) > 0:
+-                    # cx = self.mesh.centroids[ex]
+-                    # cy = self.mesh.centroids[near_set]
+-
+-                    # xi_star_y, eta_star_y = barycentric_projection(
+-                    #     cx, 
+-                    #     self.mesh.v0[near_set], 
+-                    #     self.mesh.e1[near_set], 
+-                    #     self.mesh.e2[near_set]
+-                    # )
+-                    # xi_y, w_y = telles_rule(u_star=xi_star_y, 
+-                    #                         v_star=eta_star_y, 
+-                    #                         n_leg=4)
+-                    # if self.near_subdiv_levels > 0:
+-                    #     xi_y, w_y = subdivide_triangle_quad(
+-                    #         xi_y, w_y, levels=self.near_subdiv_levels
+-                    #     )
+-
+-                    # xi_star_x, eta_star_x = barycentric_projection(
+-                    #     cy, 
+-                    #     self.mesh.v0[ex], 
+-                    #     self.mesh.e1[ex], 
+-                    #     self.mesh.e2[ex]
+-                    # )
+-                    # xi_x, w_x = telles_rule(u_star=xi_star_x, 
+-                    #                         v_star=eta_star_x, 
+-                    #                         n_leg=4)
+-                    # if self.near_subdiv_levels > 0:
+-                    #     xi_x, w_x = subdivide_triangle_quad(
+-                    #         xi_x, w_x, levels=self.near_subdiv_levels
+-                    #     )
+-
+-                    xi_x, w_x = subdivide_triangle_quad(
+-                        self.xi_eta_reg, self.w_reg, 
+-                        levels=self.near_subdiv_levels
+-                    )
+-
+-                    Bij = self._call_integrator(operator, 
+-                                                ex, np.array(near_set), 
+-                                                xi_x, w_x, 
+-                                                xi_y, w_y)
+-                    for i, ey in enumerate(near_set):
+-                        self._scatter_add(A, ex, ey, Bij[i])
++                if len(near_set) > 0:
++                    # Fix Telles implementation for near pairs (per-ey).
++                    # Use a refined rule on x once, and Telles on y per element.
++                    cx = self.mesh.centroids[ex]
++                    if self.near_subdiv_levels > 0:
++                        xi_x, w_x = subdivide_triangle_quad(
++                            self.xi_eta_reg, self.w_reg,
++                            levels=self.near_subdiv_levels
++                        )
++                    else:
++                        xi_x, w_x = self.xi_eta_reg, self.w_reg
++
++                    for ey in near_set:
++                        xi_star_y, eta_star_y = barycentric_projection(
++                            cx,
++                            self.mesh.v0[ey],
++                            self.mesh.e1[ey],
++                            self.mesh.e2[ey]
++                        )
++                        xi_y, w_y = telles_rule(u_star=xi_star_y,
++                                                v_star=eta_star_y,
++                                                n_leg=4)
++                        if self.near_subdiv_levels > 0:
++                            xi_y, w_y = subdivide_triangle_quad(
++                                xi_y, w_y, levels=self.near_subdiv_levels
++                            )
++
++                        if operator == "S":
++                            Bij = self.integrator.single_layer_block_P1P1(
++                                self.mesh, ex, ey, xi_x, w_x, xi_y, w_y
++                            )
++                        elif operator == "D":
++                            Bij = self.integrator.double_layer_block_P1P1(
++                                self.mesh, ex, ey, xi_x, w_x, xi_y, w_y
++                            )
++                        elif operator == "Kp":
++                            Bij = self.integrator.adjoint_double_layer_block_P1P1(
++                                self.mesh, ex, ey, xi_x, w_x, xi_y, w_y
++                            )
++                        elif operator == "N":
++                            Bij = self.integrator.hypersingular_block_P1P1_reg(
++                                self.mesh, ex, ey, xi_x, w_x, xi_y, w_y
++                            )
++                        else:
++                            raise ValueError(f"Unsupported operator: {operator}")
++
++                        self._scatter_add(A, ex, ey, Bij)
+*** End Patch

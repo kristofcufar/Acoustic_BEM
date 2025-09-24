@@ -277,72 +277,44 @@ class GalerkinAssembler:
                 self_set, near_set, reg_set = self._classify_pairs(ex, 
                                                                    adjacency)
                 if len(self_set) > 0:
-                    xi_x, w_x = subdivide_triangle_quad(
-                        self.xi_eta_reg, self.w_reg, 
-                        levels=self.self_subdiv_levels
-                    )
-                    xi_y, w_y = xi_x, w_x
-                    for ey in self_set:
-                        Bij = self._call_integrator(operator, 
-                                            ex, ey, 
-                                            xi_x, w_x, 
-                                            xi_y, w_y)
-                        
-                        self._scatter_add(A, ex, ey, Bij)
-
-                for ey in near_set:
-                    cx = self.mesh.centroids[ex]
-                    xi_star_y, eta_star_y = barycentric_projection(
-                        cx, 
-                        self.mesh.v0[ey], 
-                        self.mesh.e1[ey], 
-                        self.mesh.e2[ey]
-                    )
-                    xi_y, w_y = telles_rule(u_star=xi_star_y, 
-                                            v_star=eta_star_y, 
-                                            n_leg=4)
-                    if self.near_subdiv_levels > 0:
-                        xi_y, w_y = subdivide_triangle_quad(
-                            xi_y, w_y, levels=self.near_subdiv_levels
-                        )
-
-                    cy = self.mesh.centroids[ey]
-                    xi_star_x, eta_star_x = barycentric_projection(
-                        cy, 
-                        self.mesh.v0[ex], 
-                        self.mesh.e1[ex], 
-                        self.mesh.e2[ex]
-                    )
-                    xi_x, w_x = telles_rule(u_star=xi_star_x, 
-                                            v_star=eta_star_x, 
-                                            n_leg=4)
-                    if self.near_subdiv_levels > 0:
-                        xi_x, w_x = subdivide_triangle_quad(
-                            xi_x, w_x, levels=self.near_subdiv_levels
-                        )
+                    xi_x, w_x = standard_triangle_quad(7)
+                    xi_y, w_y = standard_triangle_quad(self.quad_order)
 
                     Bij = self._call_integrator(operator, 
-                                                ex, ey, 
+                                        ex, np.array(self_set), 
+                                        xi_x, w_x, 
+                                        xi_y, w_y)
+                    
+                    for i, ey in enumerate(self_set):
+                        self._scatter_add(A, ex, ey, Bij[i])
+
+                if len(near_set) > 0:
+                    xi_x, w_x = subdivide_triangle_quad(
+                        self.xi_eta_reg, self.w_reg, 
+                        levels=self.near_subdiv_levels
+                    )
+
+                    Bij = self._call_integrator(operator, 
+                                                ex, np.array(near_set), 
                                                 xi_x, w_x, 
                                                 xi_y, w_y)
-                    self._scatter_add(A, ex, ey, Bij)
-
+                    for i, ey in enumerate(near_set):
+                        self._scatter_add(A, ex, ey, Bij[i])
 
                 if len(reg_set) > 0:
                     xi_x, w_x = self.xi_eta_reg, self.w_reg
                     xi_y, w_y = self.xi_eta_reg, self.w_reg
-                    for ey in reg_set:
-                        Bij = self._call_integrator(operator, 
-                                                    ex, ey, 
-                                                    xi_x, w_x, 
-                                                    xi_y, w_y)
-                        self._scatter_add(A, ex, ey, Bij)
+                    Bij = self._call_integrator(operator,
+                                                ex, np.array(reg_set),
+                                                xi_x, w_x, xi_y, w_y)
+                    for i, ey in enumerate(reg_set):
+                        self._scatter_add(A, ex, ey, Bij[i])
 
             return A
 
     def _call_integrator(self,
                     operator: str,
-                    ex: int, ey: int,
+                    ex: int, ey: int | np.ndarray,
                     xi_x: np.ndarray, w_x: np.ndarray,
                     xi_y: np.ndarray, w_y: np.ndarray) -> np.ndarray:
         """
@@ -365,19 +337,19 @@ class GalerkinAssembler:
             Bij (np.ndarray): Local 3x3 element block as a numpy array.
         """
         if operator == "S":
-            return self.integrator.single_layer_block_P1P1(
+            return self.integrator.single_layer_block_P1P1_batch(
                 self.mesh, ex, ey, xi_x, w_x, xi_y, w_y
             )
         if operator == "D":
-            return self.integrator.double_layer_block_P1P1(
+            return self.integrator.double_layer_block_P1P1_batch(
                 self.mesh, ex, ey, xi_x, w_x, xi_y, w_y
             )
         if operator == "Kp":
-            return self.integrator.adjoint_double_layer_block_P1P1(
+            return self.integrator.adjoint_double_layer_block_P1P1_batch(
                 self.mesh, ex, ey, xi_x, w_x, xi_y, w_y
             )
         if operator == "N":
-            return self.integrator.hypersingular_block_P1P1_reg(
+            return self.integrator.hypersingular_block_P1P1_reg_batch(
                 self.mesh, ex, ey, xi_x, w_x, xi_y, w_y
             )
         raise ValueError(f"Unsupported operator: {operator}")
