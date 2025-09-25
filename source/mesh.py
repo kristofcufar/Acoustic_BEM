@@ -4,7 +4,8 @@ class Mesh:
     def __init__(self,
                  mesh_nodes: np.ndarray,
                  mesh_elements: np.ndarray,
-                 velocity_BC: np.ndarray,
+                 Neumann_BC: np.ndarray | None,
+                 Dirichlet_BC: np.ndarray | None,
                  frequency: float,
                  c0: float = 343.0,
                  rho0: float = 1.225,):
@@ -16,7 +17,10 @@ class Mesh:
                 of the mesh nodes.
             - mesh_elements: Array of shape (M, 3) representing the 
                 connectivity of the mesh elements.
-            - velocity_BC: Array of shape (N,) representing the velocity 
+            - Neumann_BC: Array of shape (N,) or (N, 3) representing the Neumann 
+                boundary conditions at the mesh nodes. If shape is (N, 3), it is
+                projected onto the mesh normals.
+            - Dirichlet_BC: Array of shape (N,) representing the Dirichlet 
                 boundary conditions at the mesh nodes.
             - frequency: Frequency of the structure vibration.
             - c0: Speed of sound in m/s. Default is 343.0 m/s.
@@ -37,7 +41,17 @@ class Mesh:
         
         self.mesh_nodes = mesh_nodes
         self.mesh_elements = mesh_elements
-        self.velocity_BC = velocity_BC
+
+        if Dirichlet_BC is None and Neumann_BC is not None:
+            self.Neumann_BC = Neumann_BC
+            self.Dirichlet_BC = None
+        elif Neumann_BC is None and Dirichlet_BC is not None:
+            self.Dirichlet_BC = Dirichlet_BC
+            self.Neumann_BC = None
+        else:
+            raise ValueError("Either Neumann_BC or Dirichlet_BC must be " \
+            "provided, not both.")
+        
         self.frequency = frequency
         self.c0 = c0
         self.rho0 = rho0
@@ -51,7 +65,8 @@ class Mesh:
         self.node_normals()
         self.get_characteristic_length()
         self.compute_jump_coefficients()
-        self.project_velocity_bc()
+        if Neumann_BC is not None:
+            self.project_velocity_bc()
 
     def precompute_elements(self):
         """
@@ -197,16 +212,16 @@ class Mesh:
         Raises:
             ValueError: if velocity_BC has an unexpected shape.
         """
-        if self.velocity_BC.ndim == 1:
+        if self.Neumann_BC.ndim == 1:
             return  # already scalar
 
-        if self.velocity_BC.shape == (self.num_nodes, 3):
-            self.velocity_BC = np.einsum(
-                "ij,ij->i", self.velocity_BC, self.node_n_hat
+        if self.Neumann_BC.shape == (self.num_nodes, 3):
+            self.Neumann_BC = np.einsum(
+                "ij,ij->i", self.Neumann_BC, self.node_n_hat
             )
             return
 
         raise ValueError(
-            f"velocity_BC has shape {self.velocity_BC.shape}, "
+            f"Neumann_BC has shape {self.Neumann_BC.shape}, "
             f"expected ({self.num_nodes},) or ({self.num_nodes},3)"
         )

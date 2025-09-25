@@ -52,8 +52,6 @@ class BEMSolver:
 
     def solve_direct(self,
                      matrices: dict[str, np.ndarray] | None = None,
-                     bc_type: Literal["Dirichlet", "Neumann"] = "Neumann",
-                     bc_values: np.ndarray | None = None,
                      jump_coeff: np.ndarray | None = None) -> np.ndarray:
         """
         Solve for the unknown boundary quantity.
@@ -61,11 +59,6 @@ class BEMSolver:
         Args:
             matrices (dict[str, np.ndarray] | None): Pre-assembled operator 
                 matrices {"S","D"}. If None, assembles them.
-            bc_type (Literal["Dirichlet","Neumann"]): Which data is prescribed.
-                - "Dirichlet": known acoustic potential φ on Γ.
-                - "Neumann": known normal velocity ∂φ/∂n on Γ.
-            bc_values (np.ndarray): Prescribed boundary data at nodes,
-                shape (num_nodes,).
             jump_coeff (np.ndarray | None): Jump coefficients at nodes,
                 shape (num_nodes,). If None, uses the mesh's jump_coefficients
                 attribute (based on solid angle) if it exists, otherwise 
@@ -78,11 +71,14 @@ class BEMSolver:
         if matrices is None:
             matrices = self.assemble_matrices(ops=("S","D"))
 
-        if bc_values is None:
-            try:
-                bc_values = self.mesh.velocity_BC
-            except AttributeError:
-                raise ValueError("No boundary condition values provided.")
+        if self.mesh.Dirichlet_BC is not None:
+            bc_type = "Dirichlet"
+            bc_values = self.mesh.Dirichlet_BC
+        elif self.mesh.Neumann_BC is not None:
+            bc_type = "Neumann"
+            bc_values = self.mesh.Neumann_BC
+        else:
+            raise ValueError("No boundary condition values provided.")
             
         S = matrices["S"]
         D = matrices["D"]
@@ -103,7 +99,7 @@ class BEMSolver:
             phi = bc_values
             A = -S
             rhs = 0.5 * phi - D @ phi
-            sol = np.linalg.solve(A, rhs)     # q = ∂φ/∂n
+            sol = np.linalg.solve(A, rhs)
             self.velocity_BC = sol
             self.potential_BC = bc_values
             return sol
@@ -116,14 +112,9 @@ class BEMSolver:
             self.potential_BC = sol
             self.velocity_BC = bc_values
             return sol
-
-        raise ValueError("bc_type must be 'Dirichlet' or 'Neumann'")
     
     def solve_burton_miller(self,
                             matrices: dict[str, np.ndarray] | None = None,
-                            bc_type: Literal["Dirichlet", 
-                                             "Neumann"] = "Neumann",
-                            bc_values: np.ndarray | None = None,
                             jump_coeff: np.ndarray | None = None,
                             alpha: float | None = None,
                             ) -> np.ndarray:
@@ -151,11 +142,6 @@ class BEMSolver:
         Args:
             matrices (dict[str, np.ndarray] | None): Pre-assembled operator 
                 matrices {"S","D","Kp","N"}. If None, assembles them.
-            bc_type (Literal["Dirichlet","Neumann"]): Which data is prescribed.
-                - "Dirichlet": known acoustic potential φ on Γ.
-                - "Neumann": known normal velocity ∂φ/∂n on Γ.
-            bc_values (np.ndarray): Prescribed boundary data at nodes,
-                shape (num_nodes,).
             jump_coeff (np.ndarray | None): Jump coefficients at nodes,
                 shape (num_nodes,). If None, uses the mesh's jump_coefficients
                 attribute (based on solid angle) if it exists, otherwise 
@@ -171,11 +157,13 @@ class BEMSolver:
         if matrices is None:
             matrices = self.assemble_matrices(ops=("S","D","Kp","N"))
 
-        if bc_values is None:
-            try:
-                bc_values = self.mesh.velocity_BC
-            except AttributeError:
-                raise ValueError("No boundary condition values provided.")
+        if self.mesh.Dirichlet_BC is not None:
+            bc_type = "Dirichlet"
+            bc_values = self.mesh.Dirichlet_BC
+
+        elif self.mesh.Neumann_BC is not None:
+            bc_type = "Neumann"
+            bc_values = self.mesh.Neumann_BC
 
         S = matrices["S"]
         D = matrices["D"]
