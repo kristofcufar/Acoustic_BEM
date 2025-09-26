@@ -1,11 +1,11 @@
 import numpy as np
-from source.quadrature import (standard_triangle_quad, 
+from acoustic_BEM.quadrature import (standard_triangle_quad, 
                                duffy_rule, 
                                telles_rule,
                                subdivide_triangle_quad,
                                barycentric_projection)
-from source.mesh import Mesh
-from source.integrators import (ElementIntegratorCollocation, 
+from acoustic_BEM.mesh import Mesh
+from acoustic_BEM.integrators import (ElementIntegratorCollocation, 
                                ElementIntegratorGalerkin)
 
 

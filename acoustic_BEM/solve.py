@@ -1,11 +1,10 @@
 import numpy as np
-from typing import Literal
 
-from source.kernels import G, dG_dn_y, dG_dr, r_vec
-from source.quadrature import (standard_triangle_quad, 
+from acoustic_BEM.kernels import G, dG_dn_y, dG_dr, r_vec
+from acoustic_BEM.quadrature import (standard_triangle_quad, 
                                map_to_physical_triangle, 
                                shape_functions_P1)
-from source.matrix_assembly import (CollocationAssembler, 
+from acoustic_BEM.matrix_assembly import (CollocationAssembler, 
                                     GalerkinAssembler)
 
 

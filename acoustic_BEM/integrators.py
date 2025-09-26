@@ -1,10 +1,10 @@
 import numpy as np
-from source.kernels import r_vec, G, dG_dr, dG_dn_y, dG_dn_x, d2G_dn_x_dn_y
-from source.quadrature import (map_to_physical_triangle_batch, 
+from acoustic_BEM.kernels import r_vec, G, dG_dr, dG_dn_y, dG_dn_x, d2G_dn_x_dn_y
+from acoustic_BEM.quadrature import (map_to_physical_triangle_batch, 
                                shape_functions_P1,
                                shape_function_gradients_P1)
 
-from source.mesh import Mesh
+from acoustic_BEM.mesh import Mesh
 
 class ElementIntegratorCollocation:
     """
