@@ -20,8 +20,7 @@ dependencies = [
     "matplotlib>=3.0.0",
     "pyMRAW>=0.2.0",
     "tqdm>=4.25.0",
-    "pyvista"
-    trame
+    "pyvista[jupyter]"
 ]
 
 classifiers = [
