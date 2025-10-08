@@ -1,13 +1,97 @@
 import numpy as np
+
+from functools import lru_cache
+
 from acoustic_BEM.quadrature import (standard_triangle_quad, 
                                duffy_rule, 
                                telles_rule,
                                subdivide_triangle_quad,
-                               barycentric_projection)
+                               barycentric_projection,
+                               shape_functions_P1,
+                               map_to_physical_triangle_batch)
+
 from acoustic_BEM.mesh import Mesh
 from acoustic_BEM.integrators import (ElementIntegratorCollocation, 
                                ElementIntegratorGalerkin)
 
+
+class _CollocationCache:
+    """
+    Geometry + quadrature cache for Collocation.
+    Caches quadrature points mapped to physical elements for:
+      - regular elements (all elements at once)
+      - Telles rule (per node-element pair)
+      - Duffy rule (per node-element pair)
+    """
+    def __init__(self, 
+                 mesh: Mesh, 
+                 quad_order: int):
+        self.m = mesh
+        self.quad_order = quad_order
+
+        self.xi_eta_reg, self.w_reg = standard_triangle_quad(self.quad_order)
+
+        self.N_reg = shape_functions_P1(self.xi_eta_reg) 
+
+        self._y_reg = None
+        self._w_reg_phys = None
+
+        self._telles = {}
+        self._duffy  = {}
+
+    def ensure_regular_mapped(self):
+        if self._y_reg is not None:
+            return
+        xi = self.xi_eta_reg; w = self.w_reg
+        yq, a2 = map_to_physical_triangle_batch(
+            xi, self.m.v0, self.m.e1, self.m.e2
+        )
+        self._y_reg = yq
+        self._w_reg_phys = (w[None, :] * a2[:, None])
+
+    def get_regular(self, 
+                    elem_idx: np.ndarray):
+        self.ensure_regular_mapped()
+        return (self._y_reg[elem_idx], 
+                self._w_reg_phys[elem_idx], 
+                self.N_reg)
+
+    def get_telles(self, 
+                   node_idx: int, 
+                   elem: int):
+        key = (node_idx, elem)
+        if key not in self._telles:
+            x = self.m.mesh_nodes[node_idx]
+            xi_star, eta_star = barycentric_projection(x, 
+                                                       self.m.v0[elem], 
+                                                       self.m.e1[elem], 
+                                                       self.m.e2[elem])
+            xi_eta, w = telles_rule(u_star=xi_star, v_star=eta_star, n_leg=4)
+            yq, a2 = map_to_physical_triangle_batch(xi_eta,
+                                                    self.m.v0[elem:elem+1],
+                                                    self.m.e1[elem:elem+1],
+                                                    self.m.e2[elem:elem+1])
+            Nq = shape_functions_P1(xi_eta)
+            self._telles[key] = (yq[0], w * a2[0], Nq)
+        return self._telles[key]
+
+    def get_duffy(self, node_idx: int, elem: int):
+        key = (node_idx, elem)
+        if key not in self._duffy:
+
+            conn = self.m.mesh_elements[elem]
+            try:
+                loc = int(np.where(conn == node_idx)[0][0])
+            except Exception:
+                loc = 0  # fallback
+            xi_eta, w = duffy_rule(n_leg=4, sing_vert_int=loc)
+            yq, a2 = map_to_physical_triangle_batch(xi_eta,
+                                                    self.m.v0[elem:elem+1],
+                                                    self.m.e1[elem:elem+1],
+                                                    self.m.e2[elem:elem+1])
+            Nq = shape_functions_P1(xi_eta)
+            self._duffy[key] = (yq[0], w * a2[0], Nq)
+        return self._duffy[key]
 
 class CollocationAssembler:
     """
@@ -49,6 +133,8 @@ class CollocationAssembler:
         self.Nn = mesh.num_nodes
         self.Ne = mesh.num_elements
 
+        self.cache = _CollocationCache(mesh, quad_order)
+
     def assemble(self, operator: str) -> np.ndarray:
         """
         Assemble the collocation matrix for a boundary operator.
@@ -72,35 +158,152 @@ class CollocationAssembler:
             sing, near, reg = self.classify_elements(x, node_idx)
 
             # --- singular elements ---
+            # if len(sing) > 0:
+            #     xi_eta, w = duffy_rule(n_leg=4)
+            #     vals = self._call_integrator(operator, x, n_x, sing, xi_eta, w)
+            #     for el, row in zip(self.mesh.mesh_elements[sing], vals):
+            #         for local, node in enumerate(el):
+            #             A[node_idx, node] += row[local]
+
             if len(sing) > 0:
-                xi_eta, w = duffy_rule(n_leg=4)
-                vals = self._call_integrator(operator, x, n_x, sing, xi_eta, w)
-                for el, row in zip(self.mesh.mesh_elements[sing], vals):
-                    for local, node in enumerate(el):
-                        A[node_idx, node] += row[local]
+                for elem in sing:
+                    yq, w_phys, Nq = self.cache.get_duffy(node_idx, elem)
+                    if operator == "S":
+                        row = self.integrator._accumulate(x, 
+                                                          yq[None, :, :], 
+                                                          w_phys[None, :], 
+                                                          Nq)
+                    elif operator == "D":
+                        row = self.integrator._accumulate_d(x, 
+                                                            yq[None, :, :], 
+                                                            w_phys[None, :], 
+                                                            Nq,
+                                            self.mesh.n_hat[elem:elem+1])
+                    elif operator == "Kp":
+                        row = self.integrator._accumulate_kp(x, 
+                                                             n_x, 
+                                                             yq[None, :, :], 
+                                                             w_phys[None, :], 
+                                                             Nq)
+                    elif operator == "N":
+                        row = self.integrator._accumulate_N(x, 
+                                                            n_x, 
+                                                            yq[None, :, :], 
+                                                            w_phys[None, :], 
+                                                            Nq,
+                                            self.mesh.n_hat[elem:elem+1])
+                    elif operator == "NReg":
+                        row = self._call_integrator(operator, 
+                                                    x, 
+                                                    n_x, 
+                                                    np.array([elem]),
+            *duffy_rule(n_leg=4, 
+                        sing_vert_int=np.where(
+                            self.mesh.mesh_elements[elem] == node_idx)[0][0]))
+                    nodes = self.mesh.mesh_elements[elem]
+                    for local, node in enumerate(nodes):
+                        A[node_idx, node] += row[0, local]
+                        self.cache.set_duffy(node_idx, elem, yq, w_phys, Nq)
+                        
 
             # --- near-singular elements ---
+            # for elem in near:
+            #     xi_star, eta_star = barycentric_projection(
+            #         x, self.mesh.v0[elem], 
+            #         self.mesh.e1[elem], self.mesh.e2[elem]
+            #     )
+            #     xi_eta, w = telles_rule(u_star=xi_star, 
+            #                             v_star=eta_star, 
+            #                             n_leg=4)
+            #     vals = self._call_integrator(operator, x, n_x,
+            #                                  np.array([elem]), xi_eta, w)
+            #     nodes = self.mesh.mesh_elements[elem]
+            #     for local, node in enumerate(nodes):
+            #         A[node_idx, node] += vals[0, local]
+
             for elem in near:
-                xi_star, eta_star = barycentric_projection(
-                    x, self.mesh.v0[elem], 
-                    self.mesh.e1[elem], self.mesh.e2[elem]
-                )
-                xi_eta, w = telles_rule(u_star=xi_star, 
-                                        v_star=eta_star, 
-                                        n_leg=4)
-                vals = self._call_integrator(operator, x, n_x,
-                                             np.array([elem]), xi_eta, w)
+                yq, w_phys, Nq = self.cache.get_telles(node_idx, elem)
+                if operator == "S":
+                    row = self.integrator._accumulate(x, 
+                                                      yq[None, :, :], 
+                                                      w_phys[None, :], 
+                                                      Nq)
+                elif operator == "D":
+                    row = self.integrator._accumulate_d(x, 
+                                                        yq[None, :, :], 
+                                                        w_phys[None, :], 
+                                                        Nq,
+                                            self.mesh.n_hat[elem:elem+1])
+                elif operator == "Kp":
+                    row = self.integrator._accumulate_kp(x, 
+                                                         n_x, 
+                                                         yq[None, :, :], 
+                                                         w_phys[None, :], Nq)
+                elif operator == "N":
+                    row = self.integrator._accumulate_N(x, 
+                                                        n_x, 
+                                                        yq[None, :, :], 
+                                                        w_phys[None, :], 
+                                                        Nq,
+                                            self.mesh.n_hat[elem:elem+1])
+                elif operator == "NReg":
+                    row = self._call_integrator(operator, 
+                                                x, 
+                                                n_x, 
+                                                np.array([elem]),
+            *telles_rule(*barycentric_projection(x, self.mesh.v0[elem],
+                                                self.mesh.e1[elem],
+                                                self.mesh.e2[elem]), n_leg=4))
                 nodes = self.mesh.mesh_elements[elem]
                 for local, node in enumerate(nodes):
-                    A[node_idx, node] += vals[0, local]
+                    A[node_idx, node] += row[0, local]
 
             # --- regular elements ---
+            # if len(reg) > 0:
+            #     xi_eta, w = standard_triangle_quad(self.quad_order)
+            #     vals = self._call_integrator(operator, x, n_x, reg, xi_eta, w)
+            #     for el, row in zip(self.mesh.mesh_elements[reg], vals):
+            #         for local, node in enumerate(el):
+            #             A[node_idx, node] += row[local]
+
             if len(reg) > 0:
-                xi_eta, w = standard_triangle_quad(self.quad_order)
-                vals = self._call_integrator(operator, x, n_x, reg, xi_eta, w)
+                y_phys, w_phys, N = self.cache.get_regular(reg)
+                # call cached variants
+                if operator == "S":
+                    vals = self.integrator._accumulate(x, 
+                                                       y_phys, 
+                                                       w_phys, 
+                                                       N)
+                elif operator == "D":
+                    ny = self.mesh.n_hat[reg]
+                    vals = self.integrator._accumulate_d(x, 
+                                                         y_phys, 
+                                                         w_phys, 
+                                                         N, 
+                                                         ny)
+                elif operator == "Kp":
+                    vals = self.integrator._accumulate_kp(x, 
+                                                          n_x, 
+                                                          y_phys, 
+                                                          w_phys, 
+                                                          N)
+                elif operator == "N":
+                    ny = self.mesh.n_hat[reg]
+                    vals = self.integrator._accumulate_N(x, 
+                                                         n_x, 
+                                                         y_phys, 
+                                                         w_phys, 
+                                                         N, 
+                                                         ny)
+                elif operator == "NReg":
+                    # optional: keep current Maue path for now
+                    vals = self._call_integrator(operator, x, n_x, reg,
+                                                self.cache.xi_eta_reg, 
+                                                self.cache.w_reg)
                 for el, row in zip(self.mesh.mesh_elements[reg], vals):
                     for local, node in enumerate(el):
                         A[node_idx, node] += row[local]
+
 
         return A
 

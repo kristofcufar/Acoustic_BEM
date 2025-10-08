@@ -283,6 +283,54 @@ class ElementIntegratorCollocation:
         
         return part1 + part2
     
+    def _accumulate(self, 
+                    x, 
+                    y_phys, 
+                    w_phys, 
+                    N):
+        _, r, _ = r_vec(x[None, None, :], y_phys)
+        Gv = G(r, self.k)
+        return np.sum((w_phys[:, :, None] * Gv[:, :, None]) * N[None, :, :], 
+                      axis=1)
+
+    def _accumulate_d(self, x, y_phys, w_phys, N, n_y):
+        _, r, rhat = r_vec(x[None, None, :], y_phys)
+        Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
+        dGdnY = dG_dn_y(rhat, dGr, n_y[:, None, :])
+        return np.sum((w_phys[:, :, None] * dGdnY[:, :, None]) * N[None, :, :], 
+                      axis=1)
+
+    def _accumulate_kp(self, x, x_normal, y_phys, w_phys, N):
+        _, r, rhat = r_vec(x[None, None, :], y_phys)
+        Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
+        nx = np.broadcast_to(x_normal[None, None, :], y_phys.shape)
+        dGdnX = dG_dn_x(rhat, dGr, nx)
+        return np.sum((w_phys[:, :, None] * dGdnX[:, :, None]) * N[None, :, :], 
+                      axis=1)
+
+    def _accumulate_N(self, x, x_normal, y_phys, w_phys, N, n_y):
+        _, r, rhat = r_vec(x[None, None, :], y_phys)
+        Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
+        d2 = d2G_dn_x_dn_y(r_hat=rhat, 
+                           r=r, 
+                           n_x=np.broadcast_to(x_normal[None, None, :], 
+                                               y_phys.shape),
+                        n_y=n_y[:, None, :], G_vals=Gv, k=self.k)
+        return np.sum((w_phys[:, :, None] * d2[:, :, None]) * N[None, :, :], 
+                      axis=1)
+    
+    def _accumulate_N_reg(self, x, x_normal, y_phys, w_phys, N, n_y):
+        K = y_phys.shape[0]
+        _, r, rhat = r_vec(x[None, None, :], y_phys)
+        Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
+        d2 = d2G_dn_x_dn_y(r_hat=rhat, 
+                           r=r, 
+                           n_x=np.broadcast_to(x_normal[None, None, :], 
+                                               y_phys.shape),
+                        n_y=n_y[:, None, :], G_vals=Gv, k=self.k)
+        return np.einsum("kq,kqj->kj", w_phys[:, :, None] * d2[:, :, None], 
+                         N[None, :, :])
+    
 
 class ElementIntegratorGalerkin:
     """
