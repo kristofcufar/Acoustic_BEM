@@ -193,17 +193,16 @@ class CollocationAssembler:
                                                             Nq,
                                             self.mesh.n_hat[elem:elem+1])
                     elif operator == "NReg":
-                        row = self._call_integrator(operator, 
-                                                    x, 
-                                                    n_x, 
-                                                    np.array([elem]),
-            *duffy_rule(n_leg=4, 
-                        sing_vert_int=np.where(
-                            self.mesh.mesh_elements[elem] == node_idx)[0][0]))
+                        xi_eta, w = duffy_rule(n_leg=4)
+                        row = self._call_integrator(
+                            operator, x, n_x, np.array([elem]), xi_eta, w
+                        )
+                    else:
+                        raise ValueError(f"Unsupported operator: {operator}")
+
                     nodes = self.mesh.mesh_elements[elem]
                     for local, node in enumerate(nodes):
                         A[node_idx, node] += row[0, local]
-                        self.cache.set_duffy(node_idx, elem, yq, w_phys, Nq)
                         
 
             # --- near-singular elements ---
