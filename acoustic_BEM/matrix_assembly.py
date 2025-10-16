@@ -15,7 +15,7 @@ from acoustic_BEM.integrators import (ElementIntegratorCollocation,
 
 class _CollocationCache:
     """
-    Geometry + quadrature cache for Collocation.
+    Geometry + quadrature cache for Collocation. Useful for k-sweeping.
     Caches quadrature points mapped to physical elements for:
       - regular elements (all elements at once)
       - Telles rule (per node-element pair)
@@ -133,22 +133,6 @@ class CollocationAssembler:
 
         self.cache = _CollocationCache(mesh, quad_order)
 
-    def _quad(self,
-                  kind: str,
-                  node_idx: int = None,
-                  elem: int = None):
-        
-        if kind == "reg":
-            return self.cache.get_regular(np.array([elem]))
-        elif kind == "sing":
-            if node_idx is None or elem is None:
-                raise ValueError("node_idx and elem must be provided for 'sing'")
-            return self.cache.get_duffy(node_idx, elem)
-        elif kind == "near":
-            if node_idx is None or elem is None:
-                raise ValueError("node_idx and elem must be provided for 'near'")
-            return self.cache.get_telles(node_idx, elem)
-        
     def assemble(self, operator: str) -> np.ndarray:
         """
         Assemble the collocation matrix for a boundary operator.
@@ -173,120 +157,152 @@ class CollocationAssembler:
 
             if len(sing) > 0:
                 for elem in sing:
-                    yq, w_phys, Nq = self.cache.get_duffy(node_idx, elem)
-                    if operator == "S":
-                        row = self.integrator._accumulate(x, 
-                                                          yq[None, :, :], 
-                                                          w_phys[None, :], 
-                                                          Nq)
-                    elif operator == "D":
-                        row = self.integrator._accumulate_d(x, 
-                                                            yq[None, :, :], 
-                                                            w_phys[None, :], 
-                                                            Nq,
-                                            self.mesh.n_hat[elem:elem+1])
-                    elif operator == "Kp":
-                        row = self.integrator._accumulate_kp(x, 
-                                                             n_x, 
-                                                             yq[None, :, :], 
-                                                             w_phys[None, :], 
-                                                             Nq)
-                    elif operator == "N":
-                        row = self.integrator._accumulate_N(x, 
-                                                            n_x, 
-                                                            yq[None, :, :], 
-                                                            w_phys[None, :], 
-                                                            Nq,
-                                            self.mesh.n_hat[elem:elem+1])
-                    elif operator == "NReg":
-                        xi_eta, w = duffy_rule(n_leg=4)
-                        row = self._call_integrator(
-                            operator, x, n_x, np.array([elem]), xi_eta, w
-                        )
+                    if operator == "NReg":
+                        xi_eta, w = duffy_rule(n_leg=4, sing_vert_int=0)
+                        row = self.call_integrator(operator, x, n_x, 
+                                                   np.array([elem]), 
+                                                   xi_eta, 
+                                                   w, 
+                                                   Nq=None,
+                                                   n_y=None)
                     else:
-                        raise ValueError(f"Unsupported operator: {operator}")
-
+                        yq, w_phys, Nq = self.cache.get_duffy(node_idx, elem)
+                        n_y = self.mesh.n_hat[elem:elem+1] if operator in \
+                            {"D", "N"} else None
+                        row = self.call_integrator(operator, x, n_x, 
+                                                np.array([elem]), 
+                                                yq[None, :, :], 
+                                                w_phys[None, :], 
+                                                Nq,
+                                                n_y)
                     nodes = self.mesh.mesh_elements[elem]
                     for local, node in enumerate(nodes):
                         A[node_idx, node] += row[0, local]
 
             for elem in near:
-                yq, w_phys, Nq = self.cache.get_telles(node_idx, elem)
-                if operator == "S":
-                    row = self.integrator._accumulate(x, 
-                                                      yq[None, :, :], 
-                                                      w_phys[None, :], 
-                                                      Nq)
-                elif operator == "D":
-                    row = self.integrator._accumulate_d(x, 
-                                                        yq[None, :, :], 
-                                                        w_phys[None, :], 
-                                                        Nq,
-                                            self.mesh.n_hat[elem:elem+1])
-                elif operator == "Kp":
-                    row = self.integrator._accumulate_kp(x, 
-                                                         n_x, 
-                                                         yq[None, :, :], 
-                                                         w_phys[None, :], Nq)
-                elif operator == "N":
-                    row = self.integrator._accumulate_N(x, 
-                                                        n_x, 
-                                                        yq[None, :, :], 
-                                                        w_phys[None, :], 
-                                                        Nq,
-                                            self.mesh.n_hat[elem:elem+1])
-                elif operator == "NReg":
-                    row = self._call_integrator(operator, 
-                                                x, 
-                                                n_x, 
-                                                np.array([elem]),
-            *telles_rule(*barycentric_projection(x, self.mesh.v0[elem],
-                                                self.mesh.e1[elem],
-                                                self.mesh.e2[elem]), n_leg=4))
+                if operator == "NReg":
+                    xi_star, eta_star = barycentric_projection(
+                        x, self.mesh.v0[elem], 
+                        self.mesh.e1[elem], self.mesh.e2[elem]
+                    )
+                    xi_eta, w = telles_rule(u_star=xi_star, 
+                                            v_star=eta_star, 
+                                            n_leg=4)
+                    row = self.call_integrator(operator, x, n_x,
+                                            np.array([elem]),
+                                            xi_eta, w, Nq=None, n_y=None)
+                else:
+                    yq, w_phys, Nq = self.cache.get_telles(node_idx, elem)
+                    n_y = self.mesh.n_hat[elem:elem+1] if operator in {"D", "N"}\
+                        else None
+                    row = self.call_integrator(operator, x, n_x, 
+                                            np.array([elem]), 
+                                            yq[None, :, :], 
+                                            w_phys[None, :], 
+                                            Nq,
+                                            n_y)
                 nodes = self.mesh.mesh_elements[elem]
                 for local, node in enumerate(nodes):
                     A[node_idx, node] += row[0, local]
 
             if len(reg) > 0:
-                y_phys, w_phys, N = self.cache.get_regular(reg)
-                # call cached variants
-                if operator == "S":
-                    vals = self.integrator._accumulate(x, 
-                                                       y_phys, 
-                                                       w_phys, 
-                                                       N)
-                elif operator == "D":
-                    ny = self.mesh.n_hat[reg]
-                    vals = self.integrator._accumulate_d(x, 
-                                                         y_phys, 
-                                                         w_phys, 
-                                                         N, 
-                                                         ny)
-                elif operator == "Kp":
-                    vals = self.integrator._accumulate_kp(x, 
-                                                          n_x, 
-                                                          y_phys, 
-                                                          w_phys, 
-                                                          N)
-                elif operator == "N":
-                    ny = self.mesh.n_hat[reg]
-                    vals = self.integrator._accumulate_N(x, 
-                                                         n_x, 
-                                                         y_phys, 
-                                                         w_phys, 
-                                                         N, 
-                                                         ny)
-                elif operator == "NReg":
-                    # optional: keep current Maue path for now
-                    vals = self._call_integrator(operator, x, n_x, reg,
-                                                self.cache.xi_eta_reg, 
-                                                self.cache.w_reg)
-                for el, row in zip(self.mesh.mesh_elements[reg], vals):
-                    for local, node in enumerate(el):
-                        A[node_idx, node] += row[local]
+                if operator == "NReg":
+                    xi_eta, w = standard_triangle_quad(self.quad_order)
+                    vals = self.call_integrator(operator, x, n_x, 
+                                                reg, 
+                                                xi_eta, 
+                                                w, 
+                                                Nq=None, 
+                                                n_y=None)
+                    for el, row in zip(self.mesh.mesh_elements[reg], vals):
+                        for local, node in enumerate(el):
+                            A[node_idx, node] += row[local]
+                    
+                    for el, row in zip(self.mesh.mesh_elements[reg], vals):
+                        for local, node in enumerate(el):
+                            A[node_idx, node] += row[local]
 
-
+                else:
+                    y_phys, w_phys, N = self.cache.get_regular(reg)
+                    n_y = self.mesh.n_hat[reg] if operator in {"D", "N"} else None
+                    vals = self.call_integrator(operator, x, n_x, reg,
+                                                y_phys, w_phys, N,
+                                                n_y)
+                    
+                    for el, row in zip(self.mesh.mesh_elements[reg], vals):
+                        for local, node in enumerate(el):
+                            A[node_idx, node] += row[local]
         return A
+    
+    def call_integrator(self,
+                        operator: str,
+                        x: np.ndarray,
+                        n_x: np.ndarray | None,
+                        elem_idx: np.ndarray | None,
+                        xi_eta: np.ndarray,
+                        w: np.ndarray,
+                        Nq: np.ndarray | None,
+                        n_y: np.ndarray | None = None) -> np.ndarray:
+        """
+        Dispatch to the correct integrator method.
+        Args:
+            operator (str): Operator key (``S``, ``D``, ``Kp``, ``N`` or 
+                "NReg").
+            x (np.ndarray): Collocation point, shape (3,).
+            n_x (np.ndarray): Outward normal at the collocation point, shape 
+                (3,).
+            elem_idx (np.ndarray): Indices of source elements.
+            xi_eta (np.ndarray): Quadrature points, shape (K, Q, 3).
+            w (np.ndarray): Quadrature weights, shape (K, Q).
+            Nq (np.ndarray): Shape functions at quadrature points, shape (Q, 3).
+            n_y (np.ndarray | None): Outward normals at source elements, 
+                shape (len(elem_idx), 3). Required for ``D``, ``N`` and 
+                ``NReg``.
+
+        Returns:
+            np.ndarray: Local element contributions, shape (len(elem_idx), 3).
+        """
+        
+        if operator == "S":
+            return self.integrator.single_layer(x = x,
+                                                y_phys = xi_eta,
+                                                w_phys = w,
+                                                N = Nq)
+        if operator == "D":
+            if n_y is None:
+                raise ValueError("n_y must be provided for double-layer \
+                                 operator")
+            return self.integrator.double_layer(x = x,
+                                               y_phys = xi_eta,
+                                               w_phys = w,
+                                               N = Nq,
+                                               n_y = n_y)
+        if operator == "Kp":
+            return self.integrator.adjoint_double_layer(x = x,
+                                                       x_normal = n_x,
+                                                       y_phys = xi_eta,
+                                                       w_phys = w,
+                                                       N = Nq)     
+        if operator == "N":
+            if n_y is None:
+                raise ValueError("n_y must be provided for hypersingular \
+                                 operator")
+            return self.integrator.hypersingular_layer(x = x,
+                                                      x_normal = n_x,
+                                                      y_phys = xi_eta,
+                                                      w_phys = w,
+                                                      N = Nq,
+                                                      n_y = n_y)
+        if operator == "NReg":
+            return self.integrator.hypersingular_layer_reg(x = x,
+                                        x_normal = n_x,
+                                        y_v0 = self.mesh.v0[elem_idx],
+                                        y_e1 = self.mesh.e1[elem_idx],
+                                        y_e2 = self.mesh.e2[elem_idx],
+                                        y_normals= self.mesh.n_hat[elem_idx],
+                                        xi_eta = xi_eta,
+                                        w = w)
+        raise ValueError(f"Unsupported operator: {operator}")
 
     def classify_elements(self, 
                           x: np.ndarray, 
@@ -310,85 +326,6 @@ class CollocationAssembler:
         near = np.setdiff1d(near, singular)
         regular = np.setdiff1d(np.arange(self.Ne), np.union1d(singular, near))
         return singular, near, regular
-
-    def _call_integrator(self,
-                         operator: str,
-                         x: np.ndarray,
-                         n_x: np.ndarray,
-                         elem_idx: np.ndarray,
-                         xi_eta: np.ndarray,
-                         w: np.ndarray) -> np.ndarray:
-        """
-        Dispatch to the correct integrator method.
-
-        Args:
-            operator (str): Operator key (``S``, ``D``, ``Kp``, ``N`` or 
-                "NReg").
-            x (np.ndarray): Collocation point, shape (3,).
-            n_x (np.ndarray): Outward normal at the collocation point, shape 
-                (3,).
-            elem_idx (np.ndarray): Indices of source elements.
-            xi_eta (np.ndarray): Quadrature points, shape (Q, 2).
-            w (np.ndarray): Quadrature weights, shape (Q,).
-
-        Returns:
-            np.ndarray: Local element contributions, shape (len(elem_idx), 3).
-        """
-        if operator == "S":
-            return self.integrator.single_layer_batch(
-                x,
-                self.mesh.v0[elem_idx],
-                self.mesh.e1[elem_idx],
-                self.mesh.e2[elem_idx],
-                xi_eta,
-                w,
-            )
-        if operator == "D":
-            return self.integrator.double_layer_batch(
-                x,
-                self.mesh.v0[elem_idx],
-                self.mesh.e1[elem_idx],
-                self.mesh.e2[elem_idx],
-                self.mesh.n_hat[elem_idx],
-                xi_eta,
-                w,
-            )
-        if operator == "Kp":
-            return self.integrator.adjoint_double_layer_batch(
-                x,
-                n_x,
-                self.mesh.v0[elem_idx],
-                self.mesh.e1[elem_idx],
-                self.mesh.e2[elem_idx],
-                xi_eta,
-                w,
-            )
-        
-        if operator == "N":
-            return self.integrator.hypersingular_batch(
-                x,
-                n_x,
-                self.mesh.v0[elem_idx],
-                self.mesh.e1[elem_idx],
-                self.mesh.e2[elem_idx],
-                self.mesh.n_hat[elem_idx],
-                xi_eta,
-                w,
-            )
-        
-        if operator == "NReg":
-            return self.integrator.hypersingular_batch_reg(
-                x,
-                n_x,
-                self.mesh.v0[elem_idx],
-                self.mesh.e1[elem_idx],
-                self.mesh.e2[elem_idx],
-                self.mesh.n_hat[elem_idx],
-                xi_eta,
-                w,
-            )
-        
-        raise ValueError(f"Unsupported operator: {operator}")
     
     
 class GalerkinAssembler:

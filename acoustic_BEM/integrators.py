@@ -138,7 +138,7 @@ class ElementIntegratorCollocation:
         return np.sum((w_phys[:, :, None] * d2[:, :, None]) * N[None, :, :], 
                       axis=1)
     
-    def hypersingular_batch_reg(self,
+    def hypersingular_layer_reg(self,
                                 x: np.ndarray,
                                 x_normal: np.ndarray,
                                 y_v0: np.ndarray,
@@ -146,7 +146,10 @@ class ElementIntegratorCollocation:
                                 y_e2: np.ndarray,
                                 y_normals: np.ndarray,
                                 xi_eta: np.ndarray,
-                                w: np.ndarray) -> np.ndarray:
+                                w: np.ndarray,
+                                y_phys: np.ndarray | None,
+                                w_phys: np.ndarray | None,
+                                N_vals: np.ndarray | None) -> np.ndarray:
         """
         Compute hypersingular integrals (regularised).
         
@@ -170,12 +173,11 @@ class ElementIntegratorCollocation:
         K = len(y_v0)
         y_phys, a2 = map_to_physical_triangle_batch(xi_eta, y_v0, y_e1, y_e2)
         w_phys = w[None, :] * a2[:, None]
+        N_vals = shape_functions_P1(xi_eta)
         
         nx_dot_ny = np.einsum("i,ki->k", x_normal, y_normals)
-
         r_norm, r_hat = r_vec(x[None, None, :], y_phys)[1:]
         G_vals = G(r_norm, self.k)
-        N_vals = shape_functions_P1(xi_eta)
         
         part1 = np.einsum("kq,k,qj,kq->kj", 
                           G_vals, nx_dot_ny, N_vals, w_phys) * (self.k**2)
