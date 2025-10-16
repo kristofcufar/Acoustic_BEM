@@ -1,5 +1,8 @@
 import numpy as np
-from acoustic_BEM.kernels import r_vec, G, dG_dr, dG_dn_y, dG_dn_x, d2G_dn_x_dn_y
+from acoustic_BEM.kernels import (r_vec, G, dG_dr, 
+                                  dG_dn_y, dG_dn_x, 
+                                  d2G_dn_x_dn_y,
+                                  ImpedanceGreen3D)
 from acoustic_BEM.quadrature import (map_to_physical_triangle_batch, 
                                shape_functions_P1,
                                shape_function_gradients_P1)
@@ -15,7 +18,8 @@ class ElementIntegratorCollocation:
     """
     
     def __init__(self, 
-                 k: float,):
+                 k: float,
+                 env_impedance: ImpedanceGreen3D | None = None):
         """
         Initialize the element integrator.
 
@@ -23,6 +27,7 @@ class ElementIntegratorCollocation:
             k: Wavenumber for Helmholtz kernel.
         """
         self.k = k
+        self.env_impedance = env_impedance
     
     def single_layer(self, 
                      x: np.ndarray, 
@@ -43,9 +48,15 @@ class ElementIntegratorCollocation:
         Returns:
             Local vector for the triangle, shape (3,).
         """
+        if self.env_impedance is None:
+            r = r_vec(x[None, None, :], y_phys)[1]
+            Gv = G(r, self.k)
 
-        r = r_vec(x[None, None, :], y_phys)[1]
-        Gv = G(r, self.k)
+        else:
+            B, Q = y_phys.shape[0], y_phys.shape[1]
+            Gv = np.empty((B, Q), dtype=np.complex128)
+            for b in range(B):
+                Gv[b, :] = self.env_impedance.G_hs(x, y_phys[b, :, :], self.k)
         return np.sum((w_phys[:, :, None] * Gv[:, :, None]) * N[None, :, :], 
                       axis=1)
 
@@ -70,10 +81,16 @@ class ElementIntegratorCollocation:
         Returns:
             Local vector for the triangle, shape (3,).
         """
-
-        r, rhat = r_vec(x[None, None, :], y_phys)[1:]
-        Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
-        dGdnY = dG_dn_y(rhat, dGr, n_y[:, None, :])
+        if self.env_impedance is None:
+            r, rhat = r_vec(x[None, None, :], y_phys)[1:]
+            Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
+            dGdnY = dG_dn_y(rhat, dGr, n_y[:, None, :])
+        else:
+            B, Q = y_phys.shape[0], y_phys.shape[1]
+            dGdnY = np.empty((B, Q), dtype=np.complex128)
+            for b in range(B):
+                dGdnY[b, :] = self.env_impedance.dG_dn_y_hs(
+                    x, y_phys[b, :, :], n_y[b, :], self.k)
         return np.sum((w_phys[:, :, None] * dGdnY[:, :, None]) * N[None, :, :], 
                       axis=1)
 
@@ -98,11 +115,18 @@ class ElementIntegratorCollocation:
         Returns:
             Local vector for the triangle, shape (3,).
         """
+        if self.env_impedance is None:
+            r, rhat = r_vec(x[None, None, :], y_phys)[1:]
+            Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
+            nx = np.broadcast_to(x_normal[None, None, :], y_phys.shape)
+            dGdnX = dG_dn_x(rhat, dGr, nx)
 
-        r, rhat = r_vec(x[None, None, :], y_phys)[1:]
-        Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
-        nx = np.broadcast_to(x_normal[None, None, :], y_phys.shape)
-        dGdnX = dG_dn_x(rhat, dGr, nx)
+        else:
+            B, Q = y_phys.shape[0], y_phys.shape[1]
+            dGdnX = np.empty((B, Q), dtype=np.complex128)
+            for b in range(B):
+                dGdnX[b, :] = self.env_impedance.dG_dn_x_hs(
+                    x, x_normal, y_phys[b, :, :], self.k)
         return np.sum((w_phys[:, :, None] * dGdnX[:, :, None]) * N[None, :, :], 
                       axis=1)
 
@@ -131,10 +155,16 @@ class ElementIntegratorCollocation:
         r, rhat = r_vec(x[None, None, :], y_phys)[1:]
         Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
         d2 = d2G_dn_x_dn_y(r_hat=rhat, 
-                           r=r, 
-                           n_x=np.broadcast_to(x_normal[None, None, :], 
-                                               y_phys.shape),
+                        r=r, 
+                        n_x=np.broadcast_to(x_normal[None, None, :], 
+                                            y_phys.shape),
                         n_y=n_y[:, None, :], G_vals=Gv, k=self.k)
+            
+        if self.env_impedance is not None:
+            B = y_phys.shape[0]
+            for b in range(B):
+                d2[b, :] += self.env_impedance.d2G_dnxdny_imp(
+                    x, x_normal, y_phys[b, :, :], n_y[b, :], self.k)
         return np.sum((w_phys[:, :, None] * d2[:, :, None]) * N[None, :, :], 
                       axis=1)
     
@@ -146,10 +176,7 @@ class ElementIntegratorCollocation:
                                 y_e2: np.ndarray,
                                 y_normals: np.ndarray,
                                 xi_eta: np.ndarray,
-                                w: np.ndarray,
-                                y_phys: np.ndarray | None,
-                                w_phys: np.ndarray | None,
-                                N_vals: np.ndarray | None) -> np.ndarray:
+                                w: np.ndarray,) -> np.ndarray:
         """
         Compute hypersingular integrals (regularised).
         
@@ -179,11 +206,21 @@ class ElementIntegratorCollocation:
         r_norm, r_hat = r_vec(x[None, None, :], y_phys)[1:]
         G_vals = G(r_norm, self.k)
         
-        part1 = np.einsum("kq,k,qj,kq->kj", 
-                          G_vals, nx_dot_ny, N_vals, w_phys) * (self.k**2)
-        
         dG_dr_vals = dG_dr(r_norm, G_vals, self.k)
         grad_y_G = -dG_dr_vals[:, :, None] * r_hat
+
+        if self.env_impedance is not None:
+            for b in range(K):
+                G_hs_b = self.env_impedance.G_hs(x, y_phys[b, :, :], self.k)
+                G_vals[b, :] = G_hs_b
+
+                grad_imp_b = self.env_impedance.grad_y_imp(x, 
+                                                           y_phys[b, :, :], 
+                                                           self.k)
+                grad_y_G[b, :, :] += grad_imp_b
+
+        part1 = np.einsum("kq,k,qj,kq->kj", 
+                          G_vals, nx_dot_ny, N_vals, w_phys) * (self.k**2)
         
         dN_ref = np.array([[-1.0, -1.0],
                           [ 1.0,  0.0],

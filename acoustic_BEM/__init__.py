@@ -10,6 +10,11 @@ from .matrix_assembly import (CollocationAssembler,
                               GalerkinAssembler)
 from .solve import BEMSolver
 
+from .kernels import (r_vec, G, dG_dr, 
+                          dG_dn_y, dG_dn_x, 
+                          d2G_dn_x_dn_y,
+                          ImpedanceGreen3D)
+
 __all__ = ["Mesh", "BEMSolver",
             "CollocationAssembler", "GalerkinAssembler", 
             "ElementIntegratorCollocation", "ElementIntegratorGalerkin"]

@@ -1,4 +1,5 @@
 import numpy as np
+from tqdm.notebook import tqdm
 
 from acoustic_BEM.quadrature import (standard_triangle_quad, 
                                duffy_rule, 
@@ -149,7 +150,7 @@ class CollocationAssembler:
 
         A = np.zeros((self.Nn, self.Nn), dtype=np.complex128)
 
-        for node_idx in range(self.Nn):
+        for node_idx in tqdm(range(self.Nn), desc=f"Assembling {operator}"):
             x = self.mesh.mesh_nodes[node_idx]
             n_x = self.mesh.node_n_hat[node_idx]
 
