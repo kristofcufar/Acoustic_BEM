@@ -31,8 +31,10 @@ class Mesh:
                 coordinates of the mesh nodes.
             mesh_elements (np.ndarray): Array of shape (M, 3) representing the 
                 connectivity of the mesh elements.
-            velocity_BC (np.ndarray): Array of shape (N,) representing the 
-                velocity boundary conditions at the mesh nodes.
+            Neumann_BC (np.ndarray | None): Array of shape (N,) or (N, 3) 
+                representing the Neumann boundary conditions at the mesh nodes.
+            Dirichlet_BC (np.ndarray | None): Array of shape (N,) representing
+                the Dirichlet boundary conditions at the mesh nodes.
             frequency (float): Frequency of the acoustic wave in Hz.
             c0 (float, optional): Speed of sound in m/s. Default is 343.0 m/s.
             rho0 (float, optional): Density of the medium in kg/m^3. Default 
@@ -66,7 +68,7 @@ class Mesh:
         self.get_characteristic_length()
         self.compute_jump_coefficients()
         if Neumann_BC is not None:
-            self.project_velocity_bc()
+            self.project_neumann_bc()
 
     def precompute_elements(self):
         """
@@ -195,10 +197,10 @@ class Mesh:
         self.jump_coefficients = coeff
         return coeff
 
-    def project_velocity_bc(self) -> None:
-        """Project vector velocity boundary data onto the mesh normals.
+    def project_neumann_bc(self) -> None:
+        """Project Neumann boundary data onto the mesh normals.
 
-        If ``self.velocity_BC`` is given as full 3-D velocity components
+        If ``self.Neumann_BC`` is given as full 3-D Neumann components
         with shape (num_nodes, 3), this replaces it by its scalar
         projection along the nodal normals:
 
@@ -207,10 +209,10 @@ class Mesh:
         where ``v_i`` is the velocity vector at node i and ``n_i`` is the
         unit outward normal stored in ``self.node_n_hat``.
 
-        Does nothing if ``velocity_BC`` is already 1-D.
+        Does nothing if ``Neumann_BC`` is already 1-D.
 
         Raises:
-            ValueError: if velocity_BC has an unexpected shape.
+            ValueError: if Neumann_BC has an unexpected shape.
         """
         if self.Neumann_BC.ndim == 1:
             return  # already scalar

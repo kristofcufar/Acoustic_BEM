@@ -23,192 +23,120 @@ class ElementIntegratorCollocation:
             k: Wavenumber for Helmholtz kernel.
         """
         self.k = k
-
-    def single_layer_batch(self, 
-                          x: np.ndarray,
-                          y_v0: np.ndarray,
-                          y_e1: np.ndarray, 
-                          y_e2: np.ndarray,
-                          xi_eta: np.ndarray,
-                          w: np.ndarray) -> np.ndarray:
-        """
-        Compute single layer integrals for a batch of triangles.
-        
-        Computes: ∫_T G(x,y) N_j(y) dS_y for j=0,1,2
-
-        Args:
-            x (np.ndarray): Observation point, shape (3,).
-            y_v0 (np.ndarray): First vertices of source triangles, shape 
-                (K, 3).
-            y_e1 (np.ndarray): First edge vectors of source triangles, shape
-                (K, 3).
-            y_e2 (np.ndarray): Second edge vectors of source triangles, shape
-                (K, 3).
-            xi_eta (np.ndarray): Quadrature points in reference triangle, shape
-                (Q, 2).
-            w (np.ndarray): Quadrature weights, shape (Q,).
-
-        Returns:
-            Local vectors for each triangle, shape (K, 3).
-        """
-        y_phys, a2 = map_to_physical_triangle_batch(xi_eta, y_v0, y_e1, y_e2)
-        N = shape_functions_P1(xi_eta)
-        
-        _, r_norm, _ = r_vec(x[None, None, :], y_phys)
-        G_vals = G(r_norm, self.k)
     
-        w_phys = w[None, :] * a2[:, None]
-        integrand = w_phys[:, :, None] * G_vals[:, :, None] * N[None, :, :]
-        
-        return np.sum(integrand, axis=1)
-
-    def double_layer_batch(self, 
-                          x: np.ndarray,
-                          y_v0: np.ndarray,
-                          y_e1: np.ndarray,
-                          y_e2: np.ndarray, 
-                          y_normals: np.ndarray,
-                          xi_eta: np.ndarray,
-                          w: np.ndarray) -> np.ndarray:
+    def single_layer(self, 
+                     x: np.ndarray, 
+                     y_phys: np.ndarray, 
+                     w_phys: np.ndarray, 
+                     N: np.ndarray) -> np.ndarray:
         """
-        Compute double layer integrals for a batch of triangles.
-        
-        Computes: ∫_T ∂G(x,y)/∂n_y N_j(y) dS_y for j=0,1,2
+        Compute single layer potential integral:
+        ∫_T G(x,y) N_j(y) dS_y
 
         Args:
-            x (np.ndarray): Observation point, shape (3,).
-            y_v0 (np.ndarray): First vertices of source triangles, shape 
-                (K, 3).
-            y_e1 (np.ndarray): First edge vectors of source triangles, shape
-                (K, 3).
-            y_e2 (np.ndarray): Second edge vectors of source triangles, shape
-                (K, 3).
-            y_normals (np.ndarray): Normal vectors of source triangles, shape
-                (K, 3).
-            xi_eta (np.ndarray): Quadrature points in reference triangle, shape
-                (Q, 2).
-            w (np.ndarray): Quadrature weights, shape (Q,).
+            x: Observation point, shape (3,).
+            y_phys: Physical quadrature points on the source triangle, shape 
+                (Q, 3).
+            w_phys: Quadrature weights on the source triangle, shape (Q,).
+            N: Shape function values at quadrature points, shape (Q, 3).
 
         Returns:
-            Local vectors for each triangle, shape (K, 3).
+            Local vector for the triangle, shape (3,).
         """
-        y_phys, a2 = map_to_physical_triangle_batch(xi_eta, y_v0, y_e1, y_e2)
-        N = shape_functions_P1(xi_eta)
-        
-        _, r_norm, r_hat = r_vec(x[None, None, :], y_phys)
-        G_vals = G(r_norm, self.k)
-        dG_dr_vals = dG_dr(r_norm, G_vals, self.k)
 
-        n_y_broadcast = y_normals[:, None, :]
-        dG_dn_y_vals = dG_dn_y(r_hat, dG_dr_vals, n_y_broadcast)
+        r = r_vec(x[None, None, :], y_phys)[1]
+        Gv = G(r, self.k)
+        return np.sum((w_phys[:, :, None] * Gv[:, :, None]) * N[None, :, :], 
+                      axis=1)
 
-        w_phys = w[None, :] * a2[:, None]
-        integrand = w_phys[:, :, None] * \
-            dG_dn_y_vals[:, :, None] * N[None, :, :]
-        
-        return np.sum(integrand, axis=1)
-
-    def adjoint_double_layer_batch(self, 
-                                  x: np.ndarray,
-                                  x_normal: np.ndarray,
-                                  y_v0: np.ndarray,
-                                  y_e1: np.ndarray,
-                                  y_e2: np.ndarray,
-                                  xi_eta: np.ndarray,
-                                  w: np.ndarray) -> np.ndarray:
+    def double_layer(self, 
+                     x: np.ndarray, 
+                     y_phys: np.ndarray, 
+                     w_phys: np.ndarray, 
+                     N: np.ndarray, 
+                     n_y: np.ndarray) -> np.ndarray:
         """
-        Compute adjoint double layer integrals for a batch of triangles.
-        
-        Computes: ∫_T ∂G(x,y)/∂n_x N_j(y) dS_y for j=0,1,2
+        Compute double layer potential integral:
+        ∫_T ∂G(x,y)/∂n_y N_j(y) dS_y
 
         Args:
-            x (np.ndarray): Observation point, shape (3,).
-            x_normal (np.ndarray): Normal vector at observation point, shape
-                (3,).
-            y_v0 (np.ndarray): First vertices of source triangles, shape
-                (K, 3).
-            y_e1 (np.ndarray): First edge vectors of source triangles, shape
-                (K, 3).
-            y_e2 (np.ndarray): Second edge vectors of source triangles, shape
-                (K, 3).
-            xi_eta (np.ndarray): Quadrature points in reference triangle, shape
-                (Q, 2).
-            w (np.ndarray): Quadrature weights, shape (Q,).
+            x: Observation point, shape (3,).
+            y_phys: Physical quadrature points on the source triangle, shape 
+                (Q, 3).
+            w_phys: Quadrature weights on the source triangle, shape (Q,).
+            N: Shape function values at quadrature points, shape (Q, 3).
+            n_y: Normal vector at source triangle, shape (3,).
 
         Returns:
-            Local vectors for each triangle, shape (K, 3).
+            Local vector for the triangle, shape (3,).
         """
-        y_phys, a2 = map_to_physical_triangle_batch(xi_eta, y_v0, y_e1, y_e2)
-        N = shape_functions_P1(xi_eta)  
 
-        _, r_norm, r_hat = r_vec(x[None, None, :], y_phys)
-        G_vals = G(r_norm, self.k)
-        dG_dr_vals = dG_dr(r_norm, G_vals, self.k)
-        
-        n_x_broadcast = np.broadcast_to(x_normal[None, None, :], y_phys.shape)
-        dG_dn_x_vals = dG_dn_x(r_hat, dG_dr_vals, n_x_broadcast)
-        
-        w_phys = w[None, :] * a2[:, None]
-        
-        integrand = \
-            w_phys[:, :, None] * dG_dn_x_vals[:, :, None] * N[None, :, :]
-        
-        return np.sum(integrand, axis=1)
+        r, rhat = r_vec(x[None, None, :], y_phys)[1:]
+        Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
+        dGdnY = dG_dn_y(rhat, dGr, n_y[:, None, :])
+        return np.sum((w_phys[:, :, None] * dGdnY[:, :, None]) * N[None, :, :], 
+                      axis=1)
 
-    def hypersingular_batch(self,
-                            x: np.ndarray,
-                            x_normal: np.ndarray,
-                            y_v0: np.ndarray,
-                            y_e1: np.ndarray,
-                            y_e2: np.ndarray,
-                            y_normals: np.ndarray,
-                            xi_eta: np.ndarray,
-                            w: np.ndarray) -> np.ndarray:
+    def adjoint_double_layer(self, 
+                             x: np.ndarray, 
+                             x_normal: np.ndarray, 
+                             y_phys: np.ndarray, 
+                             w_phys: np.ndarray, 
+                             N: np.ndarray) -> np.ndarray:
         """
-        Compute hypersingular integrals directly.
-        
-        Computes: ∫_T ∂²G/(∂n_x∂n_y) N_j(y) dS_y for j=0,1,2
+        Compute adjoint double layer potential integral:
+        ∫_T ∂G(x,y)/∂n_x N_j(y) dS_y
 
         Args:
-            x (np.ndarray): Observation point, shape (3,).
-            x_normal (np.ndarray): Normal vector at observation point, shape
-                (3,).
-            y_v0 (np.ndarray): First vertices of source triangles, shape
-                (K, 3).
-            y_e1 (np.ndarray): First edge vectors of source triangles, shape
-                (K, 3).
-            y_e2 (np.ndarray): Second edge vectors of source triangles, shape
-                (K, 3).
-            y_normals (np.ndarray): Normal vectors of source triangles, shape
-                (K, 3).
-            xi_eta (np.ndarray): Quadrature points in reference triangle, shape
-                (Q, 2).
-            w (np.ndarray): Quadrature weights, shape (Q,).
+            x: Observation point, shape (3,).
+            x_normal: Normal vector at observation point, shape (3,).
+            y_phys: Physical quadrature points on the source triangle, shape
+                (Q, 3).
+            w_phys: Quadrature weights on the source triangle, shape (Q,).
+            N: Shape function values at quadrature points, shape (Q, 3).
 
         Returns:
-            Local vectors for each triangle, shape (K, 3).
+            Local vector for the triangle, shape (3,).
         """
-        y_phys, a2 = map_to_physical_triangle_batch(xi_eta, y_v0, y_e1, y_e2)
-        N = shape_functions_P1(xi_eta)
-        
-        _, r_norm, r_hat = r_vec(x[None, None, :], y_phys)
-        G_vals = G(r_norm, self.k)
 
-        n_x_broadcast = np.broadcast_to(x_normal[None, None, :], y_phys.shape)
-        n_y_broadcast = y_normals[:, None, :]
-        
-        d2G_vals = d2G_dn_x_dn_y(r_hat = r_hat,
-                                 r = r_norm,
-                                 n_x = n_x_broadcast,
-                                 n_y = n_y_broadcast,
-                                 G_vals = G_vals,
-                                 k = self.k)
-        
-        w_phys = w[None, :] * a2[:, None]
-        
-        integrand = w_phys[:, :, None] * d2G_vals[:, :, None] * N[None, :, :]
-        
-        return np.sum(integrand, axis=1)
+        r, rhat = r_vec(x[None, None, :], y_phys)[1:]
+        Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
+        nx = np.broadcast_to(x_normal[None, None, :], y_phys.shape)
+        dGdnX = dG_dn_x(rhat, dGr, nx)
+        return np.sum((w_phys[:, :, None] * dGdnX[:, :, None]) * N[None, :, :], 
+                      axis=1)
+
+    def hypersingular_layer(self, 
+                            x: np.ndarray, 
+                            x_normal: np.ndarray, 
+                            y_phys: np.ndarray, 
+                            w_phys: np.ndarray, 
+                            N: np.ndarray, 
+                            n_y: np.ndarray) -> np.ndarray:
+        """
+        Compute adjoint double layer potential integral:
+        ∫_T ∂²G(x,y)/(∂n_x∂n_y) N_j(y) dS_y
+        Args:
+            x: Observation point, shape (3,).
+            x_normal: Normal vector at observation point, shape (3,).
+            y_phys: Physical quadrature points on the source triangle, shape
+                (Q, 3).
+            w_phys: Quadrature weights on the source triangle, shape (Q,).
+            N: Shape function values at quadrature points, shape (Q, 3).
+            n_y: Normal vector at source triangle, shape (3,).
+
+        Returns:
+            Local vector for the triangle, shape (3,).
+        """
+        r, rhat = r_vec(x[None, None, :], y_phys)[1:]
+        Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
+        d2 = d2G_dn_x_dn_y(r_hat=rhat, 
+                           r=r, 
+                           n_x=np.broadcast_to(x_normal[None, None, :], 
+                                               y_phys.shape),
+                        n_y=n_y[:, None, :], G_vals=Gv, k=self.k)
+        return np.sum((w_phys[:, :, None] * d2[:, :, None]) * N[None, :, :], 
+                      axis=1)
     
     def hypersingular_batch_reg(self,
                                 x: np.ndarray,
@@ -220,7 +148,7 @@ class ElementIntegratorCollocation:
                                 xi_eta: np.ndarray,
                                 w: np.ndarray) -> np.ndarray:
         """
-        Compute hypersingular integrals using Maue's identity.
+        Compute hypersingular integrals (regularised).
         
         Uses the identity:
         ∫_T ∂²G/(∂n_x∂n_y) N_j dS = 
@@ -244,8 +172,8 @@ class ElementIntegratorCollocation:
         w_phys = w[None, :] * a2[:, None]
         
         nx_dot_ny = np.einsum("i,ki->k", x_normal, y_normals)
-        
-        _, r_norm, r_hat = r_vec(x[None, None, :], y_phys)
+
+        r_norm, r_hat = r_vec(x[None, None, :], y_phys)[1:]
         G_vals = G(r_norm, self.k)
         N_vals = shape_functions_P1(xi_eta)
         
@@ -282,54 +210,6 @@ class ElementIntegratorCollocation:
         part2 = np.einsum("kjq,kq->kj", dot_products, w_phys)
         
         return part1 + part2
-    
-    def _accumulate(self, 
-                    x, 
-                    y_phys, 
-                    w_phys, 
-                    N):
-        _, r, _ = r_vec(x[None, None, :], y_phys)
-        Gv = G(r, self.k)
-        return np.sum((w_phys[:, :, None] * Gv[:, :, None]) * N[None, :, :], 
-                      axis=1)
-
-    def _accumulate_d(self, x, y_phys, w_phys, N, n_y):
-        _, r, rhat = r_vec(x[None, None, :], y_phys)
-        Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
-        dGdnY = dG_dn_y(rhat, dGr, n_y[:, None, :])
-        return np.sum((w_phys[:, :, None] * dGdnY[:, :, None]) * N[None, :, :], 
-                      axis=1)
-
-    def _accumulate_kp(self, x, x_normal, y_phys, w_phys, N):
-        _, r, rhat = r_vec(x[None, None, :], y_phys)
-        Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
-        nx = np.broadcast_to(x_normal[None, None, :], y_phys.shape)
-        dGdnX = dG_dn_x(rhat, dGr, nx)
-        return np.sum((w_phys[:, :, None] * dGdnX[:, :, None]) * N[None, :, :], 
-                      axis=1)
-
-    def _accumulate_N(self, x, x_normal, y_phys, w_phys, N, n_y):
-        _, r, rhat = r_vec(x[None, None, :], y_phys)
-        Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
-        d2 = d2G_dn_x_dn_y(r_hat=rhat, 
-                           r=r, 
-                           n_x=np.broadcast_to(x_normal[None, None, :], 
-                                               y_phys.shape),
-                        n_y=n_y[:, None, :], G_vals=Gv, k=self.k)
-        return np.sum((w_phys[:, :, None] * d2[:, :, None]) * N[None, :, :], 
-                      axis=1)
-    
-    def _accumulate_N_reg(self, x, x_normal, y_phys, w_phys, N, n_y):
-        K = y_phys.shape[0]
-        _, r, rhat = r_vec(x[None, None, :], y_phys)
-        Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
-        d2 = d2G_dn_x_dn_y(r_hat=rhat, 
-                           r=r, 
-                           n_x=np.broadcast_to(x_normal[None, None, :], 
-                                               y_phys.shape),
-                        n_y=n_y[:, None, :], G_vals=Gv, k=self.k)
-        return np.einsum("kq,kqj->kj", w_phys[:, :, None] * d2[:, :, None], 
-                         N[None, :, :])
     
 
 class ElementIntegratorGalerkin:

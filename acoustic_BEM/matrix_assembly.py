@@ -1,7 +1,5 @@
 import numpy as np
 
-from functools import lru_cache
-
 from acoustic_BEM.quadrature import (standard_triangle_quad, 
                                duffy_rule, 
                                telles_rule,
@@ -135,6 +133,22 @@ class CollocationAssembler:
 
         self.cache = _CollocationCache(mesh, quad_order)
 
+    def _quad(self,
+                  kind: str,
+                  node_idx: int = None,
+                  elem: int = None):
+        
+        if kind == "reg":
+            return self.cache.get_regular(np.array([elem]))
+        elif kind == "sing":
+            if node_idx is None or elem is None:
+                raise ValueError("node_idx and elem must be provided for 'sing'")
+            return self.cache.get_duffy(node_idx, elem)
+        elif kind == "near":
+            if node_idx is None or elem is None:
+                raise ValueError("node_idx and elem must be provided for 'near'")
+            return self.cache.get_telles(node_idx, elem)
+        
     def assemble(self, operator: str) -> np.ndarray:
         """
         Assemble the collocation matrix for a boundary operator.
@@ -156,14 +170,6 @@ class CollocationAssembler:
             n_x = self.mesh.node_n_hat[node_idx]
 
             sing, near, reg = self.classify_elements(x, node_idx)
-
-            # --- singular elements ---
-            # if len(sing) > 0:
-            #     xi_eta, w = duffy_rule(n_leg=4)
-            #     vals = self._call_integrator(operator, x, n_x, sing, xi_eta, w)
-            #     for el, row in zip(self.mesh.mesh_elements[sing], vals):
-            #         for local, node in enumerate(el):
-            #             A[node_idx, node] += row[local]
 
             if len(sing) > 0:
                 for elem in sing:
@@ -203,22 +209,6 @@ class CollocationAssembler:
                     nodes = self.mesh.mesh_elements[elem]
                     for local, node in enumerate(nodes):
                         A[node_idx, node] += row[0, local]
-                        
-
-            # --- near-singular elements ---
-            # for elem in near:
-            #     xi_star, eta_star = barycentric_projection(
-            #         x, self.mesh.v0[elem], 
-            #         self.mesh.e1[elem], self.mesh.e2[elem]
-            #     )
-            #     xi_eta, w = telles_rule(u_star=xi_star, 
-            #                             v_star=eta_star, 
-            #                             n_leg=4)
-            #     vals = self._call_integrator(operator, x, n_x,
-            #                                  np.array([elem]), xi_eta, w)
-            #     nodes = self.mesh.mesh_elements[elem]
-            #     for local, node in enumerate(nodes):
-            #         A[node_idx, node] += vals[0, local]
 
             for elem in near:
                 yq, w_phys, Nq = self.cache.get_telles(node_idx, elem)
@@ -256,14 +246,6 @@ class CollocationAssembler:
                 nodes = self.mesh.mesh_elements[elem]
                 for local, node in enumerate(nodes):
                     A[node_idx, node] += row[0, local]
-
-            # --- regular elements ---
-            # if len(reg) > 0:
-            #     xi_eta, w = standard_triangle_quad(self.quad_order)
-            #     vals = self._call_integrator(operator, x, n_x, reg, xi_eta, w)
-            #     for el, row in zip(self.mesh.mesh_elements[reg], vals):
-            #         for local, node in enumerate(el):
-            #             A[node_idx, node] += row[local]
 
             if len(reg) > 0:
                 y_phys, w_phys, N = self.cache.get_regular(reg)
@@ -495,6 +477,8 @@ class GalerkinAssembler:
                         self.xi_eta_reg, self.w_reg, 
                         levels=self.near_subdiv_levels
                     )
+
+                    xi_y, w_y = self.xi_eta_reg, self.w_reg
 
                     Bij = self._call_integrator(operator, 
                                                 ex, np.array(near_set), 
