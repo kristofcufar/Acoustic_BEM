@@ -7,6 +7,8 @@ from acoustic_BEM.quadrature import (standard_triangle_quad,
 from acoustic_BEM.matrix_assembly import (CollocationAssembler, 
                                     GalerkinAssembler)
 
+from tqdm.notebook import tqdm
+
 
 class BEMSolver:
     """
@@ -248,7 +250,7 @@ class BEMSolver:
         xi_eta, w = standard_triangle_quad(quad_order)
         u = np.zeros(field_points.shape[0], dtype=complex)
 
-        for e in range(self.mesh.num_elements):
+        for e in tqdm(range(self.mesh.num_elements)):
             conn = self.mesh.mesh_elements[e]
             v0, e1, e2 = self.mesh.v0[e], self.mesh.e1[e], self.mesh.e2[e]
             ny = self.mesh.n_hat[e]
@@ -261,15 +263,33 @@ class BEMSolver:
             if q is not None:
                 q_q = Nq @ q[conn]
 
-            _, r_norm, r_hat = r_vec(field_points[:, None, :], yq[None, :, :])
-            Gvals = G(r_norm, self.mesh.k)
+            if self.assembler.integrator.env_impedance is None:
+                _, r_norm, r_hat = r_vec(field_points[:, None, :], 
+                                         yq[None, :, :])
+                Gvals = G(r_norm, self.mesh.k)
+                if phi is not None:
+                    dGr = dG_dr(r_norm, Gvals, self.mesh.k)
+                    ny_b = ny[None, None, :]
+                    dGdnY = dG_dn_y(r_hat, dGr, ny_b)
+                    u += np.sum(dGdnY * (phi_q[None, :] * w_phys[None, :]), 
+                                axis=1)
+                if q is not None:
+                    u -= np.sum(Gvals * (q_q[None, :] * w_phys[None, :]), 
+                                axis=1)
+            else:
+                M = field_points.shape[0]
+                contrib = np.zeros(M, dtype=complex)
 
-            if phi is not None:
-                dGr = dG_dr(r_norm, Gvals, self.mesh.k)
-                ny_b = ny[None, None, :]
-                dGdnY = dG_dn_y(r_hat, dGr, ny_b)
-                u += np.sum(dGdnY * (phi_q[None, :] * w_phys[None, :]), axis=1)
-            if q is not None:
-                u -= np.sum(Gvals * (q_q[None, :] * w_phys[None, :]), axis=1)
+                # G (single layer)
+                if q is not None:
+                    Gmat = self.assembler.integrator.env_impedance.G_hs_mat(field_points, yq, self.mesh.k)            # (M,Q)
+                    contrib += -(Gmat @ (q_q * w_phys))                  # (M,)
+
+                # ∂G/∂n_y (double layer)
+                if phi is not None:
+                    dGmat = self.assembler.integrator.env_impedance.dG_dn_y_hs_mat(field_points, yq, ny, self.mesh.k) # (M,Q)
+                    contrib +=  (dGmat @ (phi_q * w_phys))               # (M,)
+
+                u += contrib
 
         return u
