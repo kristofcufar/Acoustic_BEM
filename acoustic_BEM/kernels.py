@@ -616,93 +616,86 @@ class ImpedanceGreen3D:
         I2 = (w2 * C2)[:, None] * ( Axy2*B2 + Ax2*By2 + Ay2*Bx2 + A2*Bxy2 )
 
         return (I1.sum(axis=0) + I2.sum(axis=0)) / (2.0 * np.pi)
-
-    def _R(self, 
-           kt: float, 
-           k: float) -> complex:
+    
+    def G_hs_mat(self, X: np.ndarray, Y: np.ndarray, k: float) -> np.ndarray:
         """
-        Compute the reflection coefficient R(kt,k) for the impedance
-        boundary condition.
-
-        R(kt,k) = (Zs * cos(theta) - Z0) / (Zs * cos(theta) + Z0)
-        where cos(theta) = kz/k, and
-            kz = sqrt(k^2 - kt^2) for kt <= k (propagating)
-            kz = i sqrt(kt^2 - k^2) for kt > k (evanescent)
-
-        Args:
-            kt (float): Transverse wavenumber.
-            k (float): Wavenumber.
-
-        Returns:
-            R (complex): Reflection coefficient.
+        Half-space pressure for many field points X (M,3) and many Y (Q,3).
+        Returns (M,Q).
         """
-        if kt <= k:
-            kz = np.sqrt(max(k*k - kt*kt, 0.0))
-        else:
-            kz = 1j * np.sqrt(kt*kt - k*k)
-        Zs = self.Zs_fn(k)
-        cos_th = kz / k
-        return (Zs * cos_th - self.Z0) / (Zs * cos_th + self.Z0)
+        self._ensure_qpack(k); qp = self._qpack
+        kt1,w1,kz1,C1 = qp["kt1"], qp["w1"], qp["kz1"], qp["C1"]
+        kt2,w2,kz2,C2 = qp["kt2"], qp["w2"], qp["kz2"], qp["C2"]
 
-    def _integrate_finite(self, 
-                          f, 
-                          a: float, 
-                          b: float) -> complex:
-        """
-        Calculate the integral of f from a to b using adaptive
-        Gauss-Legendre quadrature.
+        X = np.asarray(X, float); Y = np.asarray(Y, float)
+        M, Q = X.shape[0], Y.shape[0]
 
-        Args:
-            f (Callable[[float], complex]): Function to integrate.
-            a (float): Lower limit.
-            b (float): Upper limit.
-        Returns:
-            integral (complex): Integral value.
-        """
-        x, w = np.polynomial.legendre.leggauss(self.nodes)
-        xm = 0.5*(a+b); xr = 0.5*(b-a)
-        vals = np.vectorize(f, otypes=[np.complex128])(xm + xr*x)
-        return xr * np.sum(w * vals)
+        # free-space part
+        r = np.linalg.norm(X[:, None, :] - Y[None, :, :], axis=2)
+        G0 = np.zeros_like(r, dtype=np.complex128)
+        m = r > 0.0
+        G0[m] = np.exp(1j * k * r[m]) / (4.0 * np.pi * r[m])
 
-    def _integrate_semi_inf(self, 
-                            f, 
-                            a: float) -> complex:
-        """
-        Integrate f from a to +inf using a change of variables.
-        Uses the transformation s = (t - a)/(t - a + 1), which maps
-        t in [a, +inf) to s in [0, 1). The Jacobian is dt/ds = 1/(1-s)^2.
+        # local coords wrt arbitrary plane (FIX: use helper)
+        XL = self._to_local_points(X)  # (M,3)
+        YL = self._to_local_points(Y)  # (Q,3)
 
-        Args:
-            f (Callable[[float], complex]): Function to integrate.
-            a (float): Lower limit.
-        Returns:
-            integral (complex): Integral value.
-        """
-        g = lambda s: f(a + s/(1.0 - s)) / (1.0 - s)**2
-        return self._integrate_finite(g, 0.0, 1.0)
+        # rho_mq and z+_mq (broadcasted)
+        dx = YL[None, :, 0] - XL[:, None, 0]
+        dy = YL[None, :, 1] - XL[:, None, 1]
+        rho = np.hypot(dx, dy)
+        zp  = np.maximum(XL[:, None, 2], 0.0) + np.maximum(YL[None, :, 2], 0.0)
 
-    def integrand(self, 
-                  kt: float,
-                  k: float,
-                  rho: float, 
-                  z_plus: float) -> complex:
-        """
-        Compute the integrand for the Sommerfeld pressure integral.
-        f(kt) = [R(kt,k) * exp(ikz z_plus) * J0(kt rho) * kt] / (2ikz)
-        where kz = sqrt(k^2 - kt^2) for kt <= k (propagating)
-              kz = i sqrt(kt^2 - k^2) for kt > k (evanescent)
-        J0(0) = 1
-        Args:
-            kt (float): Transverse wavenumber.
-            k (float): Wavenumber.
-            rho (float): Horizontal distance.
-            z_plus (float): Vertical sum clamped to fluid side.
+        # Bessel & phase terms via outer products: (N, M, Q)
+        J1 = sp.j0(kt1[:, None, None] * rho[None, :, :])
+        P1 = np.exp(1j * kz1[:, None, None] * zp[None, :, :])
+        J2 = sp.j0(kt2[:, None, None] * rho[None, :, :])
+        P2 = np.exp(1j * kz2[:, None, None] * zp[None, :, :])
 
-        Returns:
-            f(kt) (complex): Integrand value.
+        I1 = (w1 * C1)[:, None, None] * (P1 * J1)
+        I2 = (w2 * C2)[:, None, None] * (P2 * J2)
+
+        Gimp = (I1.sum(axis=0) + I2.sum(axis=0)) / (2.0 * np.pi)
+        return G0 + Gimp
+
+    def dG_dn_y_hs_mat(self, X: np.ndarray, Y: np.ndarray, ny: np.ndarray, k: float) -> np.ndarray:
         """
-        J0 = 1.0 if (kt == 0.0 and rho == 0.0) else sp.j0(kt * rho)
-        kz = np.sqrt(max(k*k - kt*kt, 0.0)) if kt <= k \
-            else 1j*np.sqrt(kt*kt - k*k)
-        return (self._R(kt, k) * np.exp(1j * kz * z_plus) * J0 * kt) \
-            / (2.0j * kz)
+        ∂G_hs/∂n_y for many X (M,3) and many Y (Q,3), ny is (3,) (flat elem normal).
+        Returns (M,Q).
+        """
+        self._ensure_qpack(k); qp = self._qpack
+        kt1,w1,kz1,C1 = qp["kt1"], qp["w1"], qp["kz1"], qp["C1"]
+        kt2,w2,kz2,C2 = qp["kt2"], qp["w2"], qp["kz2"], qp["C2"]
+
+        X = np.asarray(X, float); Y = np.asarray(Y, float); ny = np.asarray(ny, float)
+
+        # FIX: use helpers (no _p0/_Binv)
+        XL  = self._to_local_points(X)      # (M,3)
+        YL  = self._to_local_points(Y)      # (Q,3)
+        nyL = self._to_local_vec(ny)        # (3,)
+
+        dx = YL[None, :, 0] - XL[:, None, 0]
+        dy = YL[None, :, 1] - XL[:, None, 1]
+        rho = np.hypot(dx, dy)
+        zp  = np.maximum(XL[:, None, 2], 0.0) + np.maximum(YL[None, :, 2], 0.0)
+
+        nz  = float(nyL[2]); nty = nyL[:2]
+        s   = np.zeros_like(rho)
+        mask = rho > 0.0
+        s[mask] = (dx[mask] * nty[0] + dy[mask] * nty[1]) / rho[mask]
+
+        J10 = sp.j0(kt1[:, None, None] * rho[None, :, :])
+        J11 = sp.j1(kt1[:, None, None] * rho[None, :, :])
+        P1  = np.exp(1j * kz1[:, None, None] * zp[None, :, :])
+
+        J20 = sp.j0(kt2[:, None, None] * rho[None, :, :])
+        J21 = sp.j1(kt2[:, None, None] * rho[None, :, :])
+        P2  = np.exp(1j * kz2[:, None, None] * zp[None, :, :])
+
+        A1 = (1j * kz1)[:, None, None] * nz * J10
+        B1 = -(kt1[:, None, None] * J11) * s[None, :, :]
+        A2 = (1j * kz2)[:, None, None] * nz * J20
+        B2 = -(kt2[:, None, None] * J21) * s[None, :, :]
+
+        I1 = (w1 * C1)[:, None, None] * P1 * (A1 + B1)
+        I2 = (w2 * C2)[:, None, None] * P2 * (A2 + B2)
+        return (I1.sum(axis=0) + I2.sum(axis=0)) / (2.0 * np.pi)
