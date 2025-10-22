@@ -187,3 +187,43 @@ def d2G_dn_x_dn_y(r_hat: np.ndarray,
     term2 = -(dGr / r) * (nx_dot_ny - nx_dot_rh * ny_dot_rh)
 
     return term1 + term2
+
+
+# Functions for Half-Space (Neumann plane)
+
+def reflect_points(y: np.ndarray,
+                   p0: np.ndarray,
+                   n_plane: np.ndarray) -> np.ndarray:
+    
+    """
+    Reflect points y across a plane defined by point p0 and normal n_plane.
+    Args:
+        y (np.ndarray): Array of shape (..., 3) representing points to be 
+            reflected.
+        p0 (np.ndarray): Array of shape (3,) representing a point on the plane.
+        n_plane (np.ndarray): Array of shape (3,) representing the normal 
+            vector of the plane.
+    Returns:
+        y_reflected (np.ndarray): Array of shape (..., 3) representing the 
+            reflected points.
+    """
+
+    v = y - p0
+    s = np.einsum('...i,i->...', v, n_plane)
+    return y - 2.0 * s[..., None] * n_plane
+
+def reflect_vectors(v: np.ndarray,
+                    n_plane: np.ndarray) -> np.ndarray:
+    """
+    Reflect vectors v across a plane defined by normal n_plane.
+    Args:
+        v (np.ndarray): Array of shape (..., 3) representing vectors to be 
+            reflected.
+        n_plane (np.ndarray): Array of shape (3,) representing the normal 
+            vector of the plane.
+    Returns:
+        v_reflected (np.ndarray): Array of shape (..., 3) representing the 
+            reflected vectors.
+    """
+    s = np.einsum('...i,i->...', v, n_plane)
+    return v - 2.0 * s[..., None] * n_plane

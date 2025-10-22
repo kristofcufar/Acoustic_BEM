@@ -12,6 +12,7 @@ from acoustic_BEM.mesh import Mesh
 from acoustic_BEM.integrators import (ElementIntegratorCollocation, 
                                ElementIntegratorGalerkin)
 
+from tqdm.notebook import tqdm
 
 class _CollocationCache:
     """
@@ -149,7 +150,8 @@ class CollocationAssembler:
 
         A = np.zeros((self.Nn, self.Nn), dtype=np.complex128)
 
-        for node_idx in range(self.Nn):
+        for node_idx in tqdm(range(self.Nn), 
+                             desc=f"Assembling {operator} matrix"):
             x = self.mesh.mesh_nodes[node_idx]
             n_x = self.mesh.node_n_hat[node_idx]
 
@@ -159,12 +161,9 @@ class CollocationAssembler:
                 for elem in sing:
                     if operator == "NReg":
                         xi_eta, w = duffy_rule(n_leg=4, sing_vert_int=0)
-                        row = self.call_integrator(operator, x, n_x, 
-                                                   np.array([elem]), 
-                                                   xi_eta, 
-                                                   w, 
-                                                   Nq=None,
-                                                   n_y=None)
+                        row = self.call_integrator(operator, x, n_x,
+                                                   np.array([elem]),
+                                                xi_eta, w, Nq=None, n_y=None)
                     else:
                         yq, w_phys, Nq = self.cache.get_duffy(node_idx, elem)
                         n_y = self.mesh.n_hat[elem:elem+1] if operator in \
@@ -301,7 +300,7 @@ class CollocationAssembler:
                                         y_e2 = self.mesh.e2[elem_idx],
                                         y_normals= self.mesh.n_hat[elem_idx],
                                         xi_eta = xi_eta,
-                                        w = w)
+                                        w = w,)
         raise ValueError(f"Unsupported operator: {operator}")
 
     def classify_elements(self, 
