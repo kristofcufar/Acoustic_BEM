@@ -2,7 +2,8 @@ import numpy as np
 from acoustic_BEM.kernels import (r_vec, G, dG_dr, 
                                   dG_dn_y, dG_dn_x, 
                                   d2G_dn_x_dn_y,
-                                  ImpedanceGreen3D)
+                                  reflect_points,
+                                  reflect_vectors)
 from acoustic_BEM.quadrature import (map_to_physical_triangle_batch, 
                                shape_functions_P1,
                                shape_function_gradients_P1)
@@ -19,16 +20,39 @@ class ElementIntegratorCollocation:
     
     def __init__(self, 
                  k: float,
-                 env_impedance: ImpedanceGreen3D | None = None):
+                 kernel_mode: str = 'free',
+                 plane_point: np.ndarray | None = None,
+                 plane_normal: np.ndarray | None = None,):
         """
         Initialize the element integrator.
 
         Args:
             k: Wavenumber for Helmholtz kernel.
+            kernel_mode: 'free' for free space, 'plane' for half-space with
+                plane boundary.
+            plane_point: A point on the plane boundary (required if kernel_mode
+                is 'plane').
+            plane_normal: Normal vector of the plane boundary (required if 
+                kernel_mode is 'plane').
         """
         self.k = k
-        self.env_impedance = env_impedance
-    
+        self._dtype = np.complex128
+
+        if kernel_mode not in ['free', 'halfspace_neumann']:
+            raise ValueError("Invalid kernel_mode. Must be 'free' or "
+                             "'halfspace_neumann'.")
+        self.kernel_mode = kernel_mode
+
+        if self.kernel_mode == 'halfspace_neumann':
+            if plane_point is None or plane_normal is None:
+                raise ValueError("plane_point and plane_normal must be "
+                                 "provided for 'halfspace_neumann' mode.")
+            
+            n = np.asarray(plane_normal, dtype=np.float64)
+            n /= np.linalg.norm(n)
+            self.plane_point = np.asarray(plane_point, dtype=np.float64)
+            self.plane_normal = n
+
     def single_layer(self, 
                      x: np.ndarray, 
                      y_phys: np.ndarray, 
@@ -52,13 +76,21 @@ class ElementIntegratorCollocation:
             r = r_vec(x[None, None, :], y_phys)[1]
             Gv = G(r, self.k)
 
-        else:
-            B, Q = y_phys.shape[0], y_phys.shape[1]
-            Gv = np.empty((B, Q), dtype=np.complex128)
-            for b in range(B):
-                Gv[b, :] = self.env_impedance.G_hs(x, y_phys[b, :, :], self.k)
-        return np.sum((w_phys[:, :, None] * Gv[:, :, None]) * N[None, :, :], 
+        r = r_vec(x[None, None, :], y_phys)[1]
+        Gv = G(r, self.k)
+        acc =  np.sum((w_phys[:, :, None] * Gv[:, :, None]) * N[None, :, :], 
                       axis=1)
+        
+        if self.kernel_mode == 'halfspace_neumann':
+            y_img = reflect_points(y_phys, 
+                                   self.plane_point,
+                                   self.plane_normal)
+            r_img = r_vec(x[None, None, :], y_img)[1]
+            Gv_img = G(r_img, self.k)
+            acc += np.sum((w_phys[:, :, None] * Gv_img[:, :, None]) * \
+                            N[None, :, :], axis=1)
+            
+        return acc
 
     def double_layer(self, 
                      x: np.ndarray, 
@@ -81,18 +113,27 @@ class ElementIntegratorCollocation:
         Returns:
             Local vector for the triangle, shape (3,).
         """
-        if self.env_impedance is None:
-            r, rhat = r_vec(x[None, None, :], y_phys)[1:]
-            Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
-            dGdnY = dG_dn_y(rhat, dGr, n_y[:, None, :])
-        else:
-            B, Q = y_phys.shape[0], y_phys.shape[1]
-            dGdnY = np.empty((B, Q), dtype=np.complex128)
-            for b in range(B):
-                dGdnY[b, :] = self.env_impedance.dG_dn_y_hs(
-                    x, y_phys[b, :, :], n_y[b, :], self.k)
-        return np.sum((w_phys[:, :, None] * dGdnY[:, :, None]) * N[None, :, :], 
+
+        r, rhat = r_vec(x[None, None, :], y_phys)[1:]
+        Gv = G(r, self.k)
+        dGr = dG_dr(r, Gv, self.k)
+        dGdnY = dG_dn_y(rhat, dGr, n_y[:, None, :])
+        acc =  np.sum((w_phys[:, :, None] * dGdnY[:, :, None]) * N[None, :, :], 
                       axis=1)
+        
+        if self.kernel_mode == 'halfspace_neumann':
+            y_img = reflect_points(y_phys, 
+                                   self.plane_point,
+                                   self.plane_normal)
+            n_y_img = reflect_vectors(n_y, self.plane_normal)
+            r_img, rhat_img = r_vec(x[None, None, :], y_img)[1:]
+            Gv_img = G(r_img, self.k)
+            dGr_img = dG_dr(r_img, Gv_img, self.k)
+            dGdnY_img = dG_dn_y(rhat_img, dGr_img, n_y_img[:, None, :])
+            acc += np.sum((w_phys[:, :, None] * dGdnY_img[:, :, None]) * \
+                            N[None, :, :], axis=1)
+            
+        return acc
 
     def adjoint_double_layer(self, 
                              x: np.ndarray, 
@@ -121,14 +162,26 @@ class ElementIntegratorCollocation:
             nx = np.broadcast_to(x_normal[None, None, :], y_phys.shape)
             dGdnX = dG_dn_x(rhat, dGr, nx)
 
-        else:
-            B, Q = y_phys.shape[0], y_phys.shape[1]
-            dGdnX = np.empty((B, Q), dtype=np.complex128)
-            for b in range(B):
-                dGdnX[b, :] = self.env_impedance.dG_dn_x_hs(
-                    x, x_normal, y_phys[b, :, :], self.k)
-        return np.sum((w_phys[:, :, None] * dGdnX[:, :, None]) * N[None, :, :], 
+        r, rhat = r_vec(x[None, None, :], y_phys)[1:]
+        Gv = G(r, self.k)
+        dGr = dG_dr(r, Gv, self.k)
+        nx = np.broadcast_to(x_normal[None, None, :], y_phys.shape)
+        dGdnX = dG_dn_x(rhat, dGr, nx)
+        acc =  np.sum((w_phys[:, :, None] * dGdnX[:, :, None]) * N[None, :, :], 
                       axis=1)
+        
+        if self.kernel_mode == 'halfspace_neumann':
+            y_img = reflect_points(y_phys, 
+                                   self.plane_point,
+                                   self.plane_normal)
+            r_img, rhat_img = r_vec(x[None, None, :], y_img)[1:]
+            Gv_img = G(r_img, self.k)
+            dGr_img = dG_dr(r_img, Gv_img, self.k)
+            dGdnX_img = dG_dn_x(rhat_img, dGr_img, x_normal[None, None, :])
+            acc += np.sum((w_phys[:, :, None] * dGdnX_img[:, :, None]) *
+                            N[None, :, :], axis=1)
+            
+        return acc
 
     def hypersingular_layer(self, 
                             x: np.ndarray, 
@@ -152,21 +205,35 @@ class ElementIntegratorCollocation:
         Returns:
             Local vector for the triangle, shape (3,).
         """
+        #TODO: recheck the halfspace implementationl and if all broadcasting is correct
         r, rhat = r_vec(x[None, None, :], y_phys)[1:]
-        Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
+        Gv = G(r, self.k)
         d2 = d2G_dn_x_dn_y(r_hat=rhat, 
-                        r=r, 
-                        n_x=np.broadcast_to(x_normal[None, None, :], 
-                                            y_phys.shape),
-                        n_y=n_y[:, None, :], G_vals=Gv, k=self.k)
-            
-        if self.env_impedance is not None:
-            B = y_phys.shape[0]
-            for b in range(B):
-                d2[b, :] += self.env_impedance.d2G_dnxdny_imp(
-                    x, x_normal, y_phys[b, :, :], n_y[b, :], self.k)
-        return np.sum((w_phys[:, :, None] * d2[:, :, None]) * N[None, :, :], 
+                           r=r, 
+                           n_x=np.broadcast_to(x_normal[None, None, :], 
+                                               y_phys.shape),
+                           n_y=n_y[:, None, :], G_vals=Gv, k=self.k)
+        acc = np.sum((w_phys[:, :, None] * d2[:, :, None]) * N[None, :, :], 
                       axis=1)
+        
+        if self.kernel_mode == 'halfspace_neumann':
+            y_img = reflect_points(y_phys, 
+                                   self.plane_point,
+                                   self.plane_normal)
+            n_y_img = reflect_vectors(n_y, self.plane_normal)
+            r_img, rhat_img = r_vec(x[None, None, :], y_img)[1:]
+            Gv_img = G(r_img, self.k)
+            d2_img = d2G_dn_x_dn_y(
+                r_hat=rhat_img, 
+                r=r_img, 
+                n_x=np.broadcast_to(x_normal[None, None, :], y_phys.shape),
+                n_y=n_y_img[:, None, :], 
+                G_vals=Gv_img, 
+                k=self.k)
+            acc += np.sum((w_phys[:, :, None] * d2_img[:, :, None]) * \
+                          N[None, :, :], axis=1)
+            
+        return acc
     
     def hypersingular_layer_reg(self,
                                 x: np.ndarray,
@@ -247,9 +314,31 @@ class ElementIntegratorCollocation:
         
         dot_products = np.einsum("kqo,kjo->kjq", grad_y_G, grad_N)
         part2 = np.einsum("kjq,kq->kj", dot_products, w_phys)
-        
+
+        if self.kernel_mode == 'halfspace_neumann':
+            y_img = reflect_points(y_phys, 
+                                   self.plane_point,
+                                   self.plane_normal)
+            y_normals_img = reflect_vectors(y_normals, self.plane_normal)
+            r_norm_img, r_hat_img = r_vec(x[None, None, :], y_img)[1:]
+            G_img = G(r_norm_img, self.k)
+            dGr_img = dG_dr(r_norm_img, G_img, self.k)
+            grad_y_G_img = -dGr_img[:, :, None] * r_hat_img
+
+            nx_dot_ny_img = np.einsum("i,ki->k", x_normal, y_normals_img)
+            part1_img = self.k**2 * np.einsum("kq,k,qj,kq->kj",
+                                                G_img, 
+                                                nx_dot_ny_img, 
+                                                N_vals, 
+                                                w_phys)
+            
+            dot_img = np.einsum("kqo,kjo->kjq", grad_y_G_img, grad_N)
+            part2_img = np.einsum("kjq,kq->kj", dot_img, w_phys)
+
+            part1 += part1_img
+            part2 += part2_img
+
         return part1 + part2
-    
 
 class ElementIntegratorGalerkin:
     """

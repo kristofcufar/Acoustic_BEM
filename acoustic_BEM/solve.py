@@ -1,11 +1,15 @@
 import numpy as np
 
-from acoustic_BEM.kernels import G, dG_dn_y, dG_dr, r_vec
+from acoustic_BEM.kernels import (G, dG_dn_y, 
+                                  dG_dr, r_vec, 
+                                  reflect_points, reflect_vectors)
 from acoustic_BEM.quadrature import (standard_triangle_quad, 
                                map_to_physical_triangle, 
                                shape_functions_P1)
 from acoustic_BEM.matrix_assembly import (CollocationAssembler, 
                                     GalerkinAssembler)
+
+from tqdm.notebook import tqdm
 
 
 class BEMSolver:
@@ -248,7 +252,8 @@ class BEMSolver:
         xi_eta, w = standard_triangle_quad(quad_order)
         u = np.zeros(field_points.shape[0], dtype=complex)
 
-        for e in range(self.mesh.num_elements):
+        for e in tqdm(range(self.mesh.num_elements), 
+                      desc="Evaluating pressure field at points"):
             conn = self.mesh.mesh_elements[e]
             v0, e1, e2 = self.mesh.v0[e], self.mesh.e1[e], self.mesh.e2[e]
             ny = self.mesh.n_hat[e]
@@ -261,7 +266,7 @@ class BEMSolver:
             if q is not None:
                 q_q = Nq @ q[conn]
 
-            _, r_norm, r_hat = r_vec(field_points[:, None, :], yq[None, :, :])
+            r_norm, r_hat = r_vec(field_points[:, None, :], yq[None, :, :])[1:]
             Gvals = G(r_norm, self.mesh.k)
 
             if phi is not None:
@@ -271,5 +276,29 @@ class BEMSolver:
                 u += np.sum(dGdnY * (phi_q[None, :] * w_phys[None, :]), axis=1)
             if q is not None:
                 u -= np.sum(Gvals * (q_q[None, :] * w_phys[None, :]), axis=1)
+            
+            if getattr(self.assembler.integrator, 
+                       "kernel_mode") == "halfspace_neumann":
+                plane_point  = self.assembler.integrator.plane_point
+                plane_normal = self.assembler.integrator.plane_normal
+
+                y_img  = reflect_points(yq, plane_point, plane_normal)
+                ny_img = reflect_vectors(ny[None, :], plane_normal)[0]
+
+                r_norm_img, r_hat_img = r_vec(field_points[:, None, :], 
+                                                 y_img[None, :, :])[1:]
+                Gvals_img = G(r_norm_img, self.mesh.k)
+
+                if phi is not None:
+                    dGr_img = dG_dr(r_norm_img, Gvals_img, self.mesh.k)
+                    ny_img_b = ny_img[None, None, :]
+                    dGdnY_img = dG_dn_y(r_hat_img, dGr_img, ny_img_b)
+                    u += np.sum(dGdnY_img * (phi_q[None, :] * w_phys[None, :]), 
+                                axis=1)
+
+                if q is not None:
+                    u -= np.sum(Gvals_img * (q_q[None, :] * w_phys[None, :]), 
+                                axis=1)
+
 
         return u
