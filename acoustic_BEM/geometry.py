@@ -1,6 +1,6 @@
 import numpy as np
 
-class Object:
+class Body:
     def __init__(self,
                  mesh_nodes: np.ndarray,
                  mesh_elements: np.ndarray,
@@ -8,7 +8,7 @@ class Object:
                  Dirichlet_BC: np.ndarray | None,
                  frequency: float | None = None,):
         """
-        Initialize the Object class for acoustic boundary element method.
+        Initialize the Body class for acoustic boundary element method.
         Args:
             mesh_nodes (np.ndarray): Array of shape (N, 3) representing the
                 coordinates of the mesh nodes.
@@ -26,12 +26,15 @@ class Object:
         self.Dirichlet_BC = Dirichlet_BC
         self.frequency = frequency
 
+        self.num_nodes = self.mesh_nodes.shape[0]
+        self.num_elements = self.mesh_elements.shape[0]
+
         self.precompute_elements()
         self.node_normals()
         self.get_characteristic_length()
         self.jump_coefficients = self.compute_jump_coefficients()
         
-        if self.Neumann_BC and self.Neumann_BC.ndim == 2:
+        if self.Neumann_BC is not None and self.Neumann_BC.ndim == 2:
             self.project_neumann_bc()
 
     def precompute_elements(self):
@@ -93,9 +96,11 @@ class Object:
         Returns:
             char_length (float): Characteristic length of the mesh.
         """
-        self.char_length = np.maximum.reduce([np.linalg.norm(self.e1, axis=1),
-                                    np.linalg.norm(self.e2, axis=1),
-                                    np.linalg.norm(self.e1 - self.e2, axis=1)])
+        self.char_length = np.maximum.reduce([
+            np.linalg.norm(self.e1, axis=1),
+            np.linalg.norm(self.e2, axis=1),
+            np.linalg.norm(self.e1 - self.e2, axis=1)
+        ])
 
     def node_in_element(self, node_idx: int) -> np.ndarray:
         """
@@ -196,7 +201,7 @@ class Field:
     def __init__(self,
                  field_extent: np.ndarray,
                  num_points: np.ndarray,
-                 rh0: float = 1.225,
+                 rho0: float = 1.225,
                  c0: float = 343.0,
                  field_type: str = "free",
                  r_center: float | None = None,
@@ -226,7 +231,7 @@ class Field:
         """
         self.field_extent = field_extent
         self.num_points = num_points
-        self.rh0 = rh0
+        self.rho0 = rho0
         self.c0 = c0
         self.r_center = r_center
 
@@ -259,24 +264,30 @@ class Field:
                          self.num_points[2])
         
         self.X, self.Y, self.Z = np.meshgrid(xs, ys, zs, indexing='ij')
-        self.field_points = np.vstack([self.X.ravel(),
-                                      self.Y.ravel(),
-                                      self.Z.ravel()]).T
+        pts = np.vstack([self.X.ravel(),
+                         self.Y.ravel(),
+                         self.Z.ravel()]).T
         
+        mask = np.ones(pts.shape[0], dtype=bool)
+
         if self.r_center:
-            dist = np.linalg.norm(self.field_points - self.r_center, axis=1)
-            mask = dist > self.r_center
-            self.field_points = self.field_points[mask]
+            dist = np.linalg.norm(pts, axis=1)
+            mask = dist > float(self.r_center)
+            pts = pts[mask]
 
         if self.field_type.lower() == "half-space":
-            to_points = self.field_points - self.HS_point
-            distances = np.dot(to_points, self.HS_normal)
-            mask = distances >= 0
-            self.field_points = self.field_points[mask]
+            to_points = pts - self.HS_point
+            distances = to_points @ self.HS_normal
+            mask = distances >= 0.0
+            pts = pts[mask]
 
+        self.field_points = pts
+        self.field_point_mask = mask
+        self.num_points_grid = self.X.shape
+        
 def box_mesh(center: np.ndarray,
              size: np.ndarray,
-             divisions: np.ndarray | None = None,
+             divisions: int | None = None,
              ) -> tuple[np.ndarray, np.ndarray]:
 
     """
@@ -284,7 +295,7 @@ def box_mesh(center: np.ndarray,
     Args:
         center (np.ndarray): Center of the box (3,).
         size (np.ndarray): Size of the box along each axis (3,).
-        divisions (int or np.ndarray, optional): Number of subdivisions along
+        divisions (int, optional): Number of subdivisions along each edge.
             each edge. If an array, should be of shape (3,) for x, y, z axes.
     Returns:
         v (np.ndarray): Array of shape (N, 3) with vertex coordinates.
@@ -295,6 +306,13 @@ def box_mesh(center: np.ndarray,
     c = np.asarray(center).reshape(3)
     if np.any(np.array(size) <= 0):
         raise ValueError("Size dimensions must be positive.")
+    
+    if divisions is not None:
+        if isinstance(divisions, int):
+            if divisions < 1:
+                raise ValueError("Divisions must be at least 1.")
+        else:
+            raise ValueError("Divisions must be an integer.")
 
     h = 0.5 * np.array(size)
     signs = np.array([[-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
@@ -305,10 +323,8 @@ def box_mesh(center: np.ndarray,
                          [0, 1, 5], [0, 5, 4], [2, 3, 7], [2, 7, 6],
                          [0, 3, 7], [0, 7, 4], [1, 2, 6], [1, 6, 5]])
 
-    if divisions is not None and np.any(np.array(divisions) > 1):
-        div = int(np.max(divisions)) if \
-            isinstance(divisions, (list, np.ndarray)) else int(divisions)
-        v, elements = subdivide_triangles(v, elements, div)
+    if divisions is not None and divisions > 1:
+        v, elements = subdivide_triangles(v, elements, divisions)
 
     return v, elements
 

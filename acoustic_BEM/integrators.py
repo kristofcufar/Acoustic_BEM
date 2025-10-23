@@ -72,10 +72,6 @@ class ElementIntegratorCollocation:
         Returns:
             Local vector for the triangle, shape (3,).
         """
-        if self.env_impedance is None:
-            r = r_vec(x[None, None, :], y_phys)[1]
-            Gv = G(r, self.k)
-
         r = r_vec(x[None, None, :], y_phys)[1]
         Gv = G(r, self.k)
         acc =  np.sum((w_phys[:, :, None] * Gv[:, :, None]) * N[None, :, :], 
@@ -156,12 +152,6 @@ class ElementIntegratorCollocation:
         Returns:
             Local vector for the triangle, shape (3,).
         """
-        if self.env_impedance is None:
-            r, rhat = r_vec(x[None, None, :], y_phys)[1:]
-            Gv = G(r, self.k); dGr = dG_dr(r, Gv, self.k)
-            nx = np.broadcast_to(x_normal[None, None, :], y_phys.shape)
-            dGdnX = dG_dn_x(rhat, dGr, nx)
-
         r, rhat = r_vec(x[None, None, :], y_phys)[1:]
         Gv = G(r, self.k)
         dGr = dG_dr(r, Gv, self.k)
@@ -275,16 +265,6 @@ class ElementIntegratorCollocation:
         
         dG_dr_vals = dG_dr(r_norm, G_vals, self.k)
         grad_y_G = -dG_dr_vals[:, :, None] * r_hat
-
-        if self.env_impedance is not None:
-            for b in range(K):
-                G_hs_b = self.env_impedance.G_hs(x, y_phys[b, :, :], self.k)
-                G_vals[b, :] = G_hs_b
-
-                grad_imp_b = self.env_impedance.grad_y_imp(x, 
-                                                           y_phys[b, :, :], 
-                                                           self.k)
-                grad_y_G[b, :, :] += grad_imp_b
 
         part1 = np.einsum("kq,k,qj,kq->kj", 
                           G_vals, nx_dot_ny, N_vals, w_phys) * (self.k**2)
