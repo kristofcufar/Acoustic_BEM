@@ -13,8 +13,6 @@ from acoustic_BEM.mesh import Mesh
 from acoustic_BEM.integrators import (ElementIntegratorCollocation, 
                                ElementIntegratorGalerkin)
 
-from tqdm.notebook import tqdm
-
 class _CollocationCache:
     """
     Geometry + quadrature cache for Collocation. Useful for k-sweeping.
@@ -214,10 +212,6 @@ class CollocationAssembler:
                                                 w, 
                                                 Nq=None, 
                                                 n_y=None)
-                    for el, row in zip(self.mesh.mesh_elements[reg], vals):
-                        for local, node in enumerate(el):
-                            A[node_idx, node] += row[local]
-                    
                     for el, row in zip(self.mesh.mesh_elements[reg], vals):
                         for local, node in enumerate(el):
                             A[node_idx, node] += row[local]

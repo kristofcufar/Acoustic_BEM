@@ -32,7 +32,6 @@ class Body:
         self.precompute_elements()
         self.node_normals()
         self.get_characteristic_length()
-        self.jump_coefficients = self.compute_jump_coefficients()
         
         if self.Neumann_BC is not None and self.Neumann_BC.ndim == 2:
             self.project_neumann_bc()
@@ -115,57 +114,6 @@ class Body:
         """
         return np.where(self.mesh_elements == node_idx)[0]
 
-    def compute_jump_coefficients(self) -> np.ndarray:
-        """
-        Compute jump coefficients C(x) for the double-layer operator. Uses the
-        Van Oosterom and Strackee method to compute the solid angle.
-
-        For each node, compute the interior solid angle Ω(x) subtended by
-        the adjacent triangular elements, then set
-
-            C(x) = Ω(x) / (4π).
-
-        For smooth closed surfaces, this tends to 0.5 everywhere.
-        For open or non-smooth surfaces, values reflect the local geometry.
-
-        Returns:
-            np.ndarray: Jump coefficients, shape (num_nodes,).
-        """
-        coeff = np.zeros(self.num_nodes, dtype=float)
-
-        for i in range(self.num_nodes):
-            elems = self.node_in_el[i]
-            x0 = self.mesh_nodes[i]
-            n0 = self.node_n_hat[i]
-            obs = x0 + 1e-6 * n0
-
-            solid_angle = 0.0
-            for e in elems:
-                v0 = self.mesh_nodes[self.mesh_elements[e, 0]]
-                v1 = self.mesh_nodes[self.mesh_elements[e, 1]]
-                v2 = self.mesh_nodes[self.mesh_elements[e, 2]]
-
-                r0 = v0 - obs
-                r1 = v1 - obs
-                r2 = v2 - obs
-
-                a = np.linalg.norm(r0)
-                b = np.linalg.norm(r1)
-                c = np.linalg.norm(r2)
-                triple = np.dot(r0, np.cross(r1, r2))
-                denom = (a*b*c
-                        + np.dot(r0, r1)*c
-                        + np.dot(r1, r2)*a
-                        + np.dot(r2, r0)*b)
-
-                angle = 2.0 * np.arctan2(triple, denom)
-                solid_angle += angle
-
-            coeff[i] = abs(solid_angle) / (4.0 * np.pi)
-
-        self.jump_coefficients = coeff
-        return coeff
-
     def project_neumann_bc(self) -> None:
         """Project Neumann boundary data onto the mesh normals.
 
@@ -202,11 +150,7 @@ class Field:
                  field_extent: np.ndarray,
                  num_points: np.ndarray,
                  rho0: float = 1.225,
-                 c0: float = 343.0,
-                 field_type: str = "free",
-                 r_center: float | None = None,
-                 HS_point: np.ndarray | None = None,
-                 HS_normal:  np.ndarray | None = None):
+                 c0: float = 343.0,):
         """
         Initialize the Field class for acoustic boundary element method.
         Initializes:
@@ -221,29 +165,11 @@ class Field:
                 air).
             c0 (float): Speed of sound in the medium (default is 343 m/s for 
                 air).
-            field_type (str): Type of the field, either "free" or "half-space".
-            r_center (float | None): If provided, only points outside this 
-                radius from the origin are included.
-            HS_point (np.ndarray | None): A point on the half-space plane
-                (required if field_type is "half-space").
-            HS_normal (np.ndarray | None): Normal vector of the half-space 
-                plane (required if field_type is "half-space").
         """
         self.field_extent = field_extent
         self.num_points = num_points
         self.rho0 = rho0
         self.c0 = c0
-        self.r_center = r_center
-
-        self.field_type = field_type
-        if self.field_type.lower() == "half-space":
-            if HS_point is None or HS_normal is None:
-                raise ValueError("HS_point and HS_normal must be provided for"\
-                                 " half-space field type.")
-            self.HS_point = HS_point
-            self.HS_normal = HS_normal / np.linalg.norm(HS_normal)
-        elif self.field_type.lower() != "free":
-            raise ValueError("field_type must be 'free' or 'half-space'.")
         
         if np.any(self.num_points < 1):
             raise ValueError("num_points must be positive integers.")
@@ -267,23 +193,8 @@ class Field:
         pts = np.vstack([self.X.ravel(),
                          self.Y.ravel(),
                          self.Z.ravel()]).T
-        
-        mask = np.ones(pts.shape[0], dtype=bool)
-
-        if self.r_center:
-            dist = np.linalg.norm(pts, axis=1)
-            mask = dist > float(self.r_center)
-            pts = pts[mask]
-
-        if self.field_type.lower() == "half-space":
-            to_points = pts - self.HS_point
-            distances = to_points @ self.HS_normal
-            mask = distances >= 0.0
-            pts = pts[mask]
 
         self.field_points = pts
-        self.field_point_mask = mask
-        self.num_points_grid = self.X.shape
         
 def box_mesh(center: np.ndarray,
              size: np.ndarray,

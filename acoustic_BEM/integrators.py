@@ -418,10 +418,10 @@ class ElementIntegratorGalerkin:
         rhat = diff / rxy[:, :, :, None]
         Gxy = G(rxy, self.k).astype(self._dtype, copy=False)
         dGr = dG_dr(rxy, Gxy, self.k).astype(self._dtype, copy=False)
-        ndoty = np.einsum('qbk i, b i -> qbk', rhat, ny)
+        ndoty = np.einsum('qbki,bi->qbk', rhat, ny)
         K = -dGr * ndoty
 
-        return np.einsum("qi, qbk, bkj -> bij", L, K, R, optimize=True)
+        return np.einsum("qi,qbk,bkj->bij", L, K, R, optimize=True)
 
     def adjoint_double_layer_block_P1P1_batch(self,
                                         mesh,
@@ -478,12 +478,12 @@ class ElementIntegratorGalerkin:
         Gxy = G(rxy, self.k).astype(self._dtype, copy=False)
         dGr = dG_dr(rxy, Gxy, self.k).astype(self._dtype, copy=False)
         
-        ndotx = np.einsum('qbk i, i -> qbk', rhat, nx)
+        ndotx = np.einsum('qbki,i->qbk', rhat, nx)
         K = dGr * ndotx
 
         L = (Nx * wX[:, None]).astype(self._dtype, copy=False)
         R = (Ny[None, :, :] * wY[:, :, None]).astype(self._dtype, copy=False)
-        return np.einsum("qi, qbk, bkj -> bij", L, K, R, optimize=True)
+        return np.einsum("qi,qbk,bkj->bij", L, K, R, optimize=True)
     
     def hypersingular_block_P1P1_reg_batch(self, 
                                            mesh: Mesh, 

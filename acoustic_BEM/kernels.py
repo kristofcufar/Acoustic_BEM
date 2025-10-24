@@ -1,6 +1,4 @@
 import numpy as np
-from scipy import special as sp
-from typing import Callable
 
 def r_vec(x: np.ndarray, 
           y: np.ndarray) -> np.ndarray:
