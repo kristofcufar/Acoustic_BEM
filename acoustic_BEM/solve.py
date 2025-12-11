@@ -196,7 +196,8 @@ class BEMSolver:
         if bc_type == "Neumann":
             q = bc_values.astype(complex, copy=False)
             A = (D - C) + ialpha * N
-            rhs = (S - ialpha * Kp) @ q
+            # rhs = (S - ialpha * Kp) @ q
+            rhs = (S + ialpha * (C + Kp)) @ q
             phi = np.linalg.solve(A, rhs)
             self.potential_BC = phi
             self.velocity_BC = bc_values
