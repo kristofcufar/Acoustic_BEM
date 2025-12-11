@@ -217,7 +217,8 @@ class BEMSolver:
                        field_points: np.ndarray,
                        phi: np.ndarray | None = None,
                        q: np.ndarray | None = None,
-                       quad_order: int = 3) -> np.ndarray:
+                       quad_order: int = 3,
+                       verbose: bool = True) -> np.ndarray:
         """
         Evaluate the potential at domain points using boundary solution.
 
@@ -253,7 +254,8 @@ class BEMSolver:
         u = np.zeros(field_points.shape[0], dtype=complex)
 
         for e in tqdm(range(self.mesh.num_elements), 
-                      desc="Evaluating pressure field at points"):
+                      desc="Evaluating pressure field at points",
+                      disable = not verbose):
             conn = self.mesh.mesh_elements[e]
             v0, e1, e2 = self.mesh.v0[e], self.mesh.e1[e], self.mesh.e2[e]
             ny = self.mesh.n_hat[e]

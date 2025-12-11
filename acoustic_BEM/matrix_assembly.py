@@ -133,7 +133,7 @@ class CollocationAssembler:
 
         self.cache = _CollocationCache(mesh, quad_order)
 
-    def assemble(self, operator: str) -> np.ndarray:
+    def assemble(self, operator: str, verbose: bool = True) -> np.ndarray:
         """
         Assemble the collocation matrix for a boundary operator.
 
@@ -150,7 +150,8 @@ class CollocationAssembler:
         A = np.zeros((self.Nn, self.Nn), dtype=np.complex128)
 
         for node_idx in tqdm(range(self.Nn), 
-                             desc=f"Assembling {operator} matrix"):
+                             desc=f"Assembling {operator} matrix",
+                             disable = not verbose):
             x = self.mesh.mesh_nodes[node_idx]
             n_x = self.mesh.node_n_hat[node_idx]
 

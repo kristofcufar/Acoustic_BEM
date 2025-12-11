@@ -30,7 +30,8 @@ class Body:
         self.num_elements = self.mesh_elements.shape[0]
 
         self.precompute_elements()
-        self.node_normals()
+        # Compute default nodal normals using area weighting
+        self.node_normals_area()
         self.get_characteristic_length()
         
         if self.Neumann_BC is not None and self.Neumann_BC.ndim == 2:
@@ -70,23 +71,65 @@ class Body:
         self.areas = areas
         self.node_in_el = node_in_el
 
-    def node_normals(self) -> np.ndarray:
+    def node_normals_area(self) -> np.ndarray:
         """
-        Compute area-weighted normals at each mesh node.
+        Compute area-weighted normals at each mesh node and store in 
+        self.node_n_hat.
+        """
+        node_normals = np.zeros((self.num_nodes, 3), dtype=float)
 
-        Returns:
-            node_normals (np.ndarray): Array of shape (N, 3) representing the
-                area-weighted normals at each mesh node.
-        """
-        node_normals = np.zeros((self.num_nodes, 3))
-        for elem in range(self.num_elements):
-            for i in range(3):
-                node_normals[self.mesh_elements[elem, i], :] += \
-                    self.n_hat[elem, :] * self.areas[elem] / 3.0
-                
-        node_normals /= np.linalg.norm(node_normals, axis=1)[:, np.newaxis] \
-                        + 1e-300
+        contrib = self.n_hat * (self.areas[:, None])
+
+        idx0 = self.mesh_elements[:, 0]
+        idx1 = self.mesh_elements[:, 1]
+        idx2 = self.mesh_elements[:, 2]
+        np.add.at(node_normals, idx0, contrib)
+        np.add.at(node_normals, idx1, contrib)
+        np.add.at(node_normals, idx2, contrib)
+
+        norms = np.linalg.norm(node_normals, axis=1, keepdims=True) + 1e-300
+        node_normals = node_normals / norms
+
         self.node_n_hat = node_normals
+
+    def node_normals_angle(self) -> np.ndarray:
+        """
+        Compute angle-weighted normals at each mesh node and store in
+        self.node_n_hat.
+
+        Each face normal contributes to its three vertices weighted by the
+        interior angle at that vertex. This often produces smoother per-vertex
+        normals on irregular meshes than pure area weighting.
+        """
+        a0, b0 = self.e1, self.e2               
+        a1, b1 = (self.e2 - self.e1), (-self.e1)
+        a2, b2 = (self.e1 - self.e2), (-self.e2)
+
+        ang0 = self._angles(a0, b0)
+        ang1 = self._angles(a1, b1)
+        ang2 = self._angles(a2, b2)
+
+        node_normals = np.zeros((self.num_nodes, 3), dtype=float)
+        idx0 = self.mesh_elements[:, 0]
+        idx1 = self.mesh_elements[:, 1]
+        idx2 = self.mesh_elements[:, 2]
+
+        np.add.at(node_normals, idx0, self.n_hat * ang0[:, None])
+        np.add.at(node_normals, idx1, self.n_hat * ang1[:, None])
+        np.add.at(node_normals, idx2, self.n_hat * ang2[:, None])
+
+        norms = np.linalg.norm(node_normals, axis=1, keepdims=True) + 1e-300
+        node_normals = node_normals / norms
+
+        self.node_n_hat = node_normals
+    
+    def _angles(self,
+                u: np.ndarray, 
+                v: np.ndarray) -> np.ndarray:
+        un = u / (np.linalg.norm(u, axis=1, keepdims=True) + 1e-300)
+        vn = v / (np.linalg.norm(v, axis=1, keepdims=True) + 1e-300)
+        cos = np.clip(np.sum(un * vn, axis=1), -1.0, 1.0)
+        return np.arccos(cos)
 
     def get_characteristic_length(self) -> float:
         """
