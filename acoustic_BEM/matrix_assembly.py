@@ -64,7 +64,7 @@ class _CollocationCache:
                                                        self.m.v0[elem], 
                                                        self.m.e1[elem], 
                                                        self.m.e2[elem])
-            xi_eta, w = telles_rule(u_star=xi_star, v_star=eta_star, n_leg=4)
+            xi_eta, w = telles_rule(u_star=xi_star, v_star=eta_star, n_leg=10)
             yq, a2 = map_to_physical_triangle_batch(xi_eta,
                                                     self.m.v0[elem:elem+1],
                                                     self.m.e1[elem:elem+1],
@@ -82,7 +82,7 @@ class _CollocationCache:
                 loc = int(np.where(conn == node_idx)[0][0])
             except Exception:
                 loc = 0  # fallback
-            xi_eta, w = duffy_rule(n_leg=4, sing_vert_int=loc)
+            xi_eta, w = duffy_rule(n_leg=10, sing_vert_int=loc)
             yq, a2 = map_to_physical_triangle_batch(xi_eta,
                                                     self.m.v0[elem:elem+1],
                                                     self.m.e1[elem:elem+1],
@@ -160,7 +160,12 @@ class CollocationAssembler:
             if len(sing) > 0:
                 for elem in sing:
                     if operator == "NReg":
-                        xi_eta, w = duffy_rule(n_leg=4, sing_vert_int=0)
+                        conn = self.mesh.mesh_elements[elem]
+                        try:
+                            loc = int(np.where(conn == node_idx)[0][0])
+                        except Exception:
+                            loc = 0  # fallback
+                        xi_eta, w = duffy_rule(n_leg=10, sing_vert_int=loc)
                         row = self.call_integrator(operator, x, n_x,
                                                    np.array([elem]),
                                                 xi_eta, w, Nq=None, n_y=None)
@@ -186,7 +191,7 @@ class CollocationAssembler:
                     )
                     xi_eta, w = telles_rule(u_star=xi_star, 
                                             v_star=eta_star, 
-                                            n_leg=4)
+                                            n_leg=10)
                     row = self.call_integrator(operator, x, n_x,
                                             np.array([elem]),
                                             xi_eta, w, Nq=None, n_y=None)

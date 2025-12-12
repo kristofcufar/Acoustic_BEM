@@ -57,7 +57,16 @@ class BEMSolver:
                      matrices: dict[str, np.ndarray] | None = None,
                      jump_coeff: np.ndarray | None = None) -> np.ndarray:
         """
-        Solve for the unknown boundary quantity.
+        Solve equation:
+
+            (D - C) φ = S q
+        
+        for the unknown boundary quantity. For exterior problems:
+
+        - bc_type="Dirichlet": given φ on Γ, solve for q = ∂φ/∂n on Γ
+        - bc_type="Neumann": given q = ∂φ/∂n on Γ, solve for φ on Γ
+
+
 
         Args:
             matrices (dict[str, np.ndarray] | None): Pre-assembled operator 
@@ -100,8 +109,8 @@ class BEMSolver:
 
         if bc_type == "Dirichlet":            
             phi = bc_values
-            A = -S
-            rhs = 0.5 * phi - D @ phi
+            A = S
+            rhs = (D - C) @ phi
             sol = np.linalg.solve(A, rhs)
             self.velocity_BC = sol
             self.potential_BC = bc_values
@@ -127,8 +136,10 @@ class BEMSolver:
         This method forms a linear combination of the standard boundary equation
         and its normal-derivative equation to remove spurious resonances.
 
-        The combined equation is taken (for exterior problems) in the form
-            (D - C) φ - S q  + i α [ N φ + K' q ] = 0,
+        The combined equation is taken (for exterior problems) in the form:
+            (D - C) φ + i α N φ = S q + i α (C + K') q,
+            [(D - C) + i α N] φ = [S + i α (C + K')] q
+
         where C is the double-layer jump term (typically 0.5·I on closed smooth
         surfaces).
             S  : single layer (G)
@@ -138,9 +149,7 @@ class BEMSolver:
 
         Given boundary data, the method solves for the complementary unknown:
         - bc_type="Neumann": given q = ∂φ/∂n, solve for φ on Γ
-            [(D - C) + i α N] φ = [S + i α K'] q
         - bc_type="Dirichlet": given φ on Γ, solve for q = ∂φ/∂n on Γ
-            [-S + i α K'] q = [C - D - i α N] φ
 
         Args:
             matrices (dict[str, np.ndarray] | None): Pre-assembled operator 
@@ -196,7 +205,6 @@ class BEMSolver:
         if bc_type == "Neumann":
             q = bc_values.astype(complex, copy=False)
             A = (D - C) + ialpha * N
-            # rhs = (S - ialpha * Kp) @ q
             rhs = (S + ialpha * (C + Kp)) @ q
             phi = np.linalg.solve(A, rhs)
             self.potential_BC = phi
@@ -205,8 +213,8 @@ class BEMSolver:
 
         if bc_type == "Dirichlet":
             phi = bc_values.astype(complex, copy=False)
-            A = (-S) + ialpha * Kp
-            rhs = (C - D - ialpha * N) @ phi
+            A = S + ialpha * (C + Kp)
+            rhs = (D - C + ialpha * N) @ phi
             q = np.linalg.solve(A, rhs)
             self.velocity_BC = q
             self.potential_BC = bc_values

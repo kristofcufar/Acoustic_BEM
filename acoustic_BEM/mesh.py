@@ -43,34 +43,26 @@ class Mesh:
             components
             )
         
+        self.num_nodes = mesh_nodes.shape[0]
+        self.num_elements = mesh_elements.shape[0]
+        
         if (q_all is not None) and (p_all is not None):
             raise ValueError("Cannot mix global Neumann and Dirichlet in this "\
             "pipeline.")
         if (q_all is None) and (p_all is None):
             q_all = np.zeros(mesh_nodes.shape[0], float)
 
-        (v0, e1, e2, a2, n_hat, centroids, areas,
-         node_in_el, node_n_hat, char_length) = self._precompute_global(
-             mesh_nodes, 
-             mesh_elements
-             )
-
-        if q_all is not None and q_all.ndim == 2 and q_all.shape[1] == 3:
-            q_all = np.einsum("ij,ij->i", q_all, node_n_hat)
-
-        jump_coefficients = self._compute_jump_coefficients(mesh_nodes, 
-                                                            mesh_elements, 
-                                                            node_in_el, 
-                                                            node_n_hat)
-
         self.mesh_nodes = mesh_nodes
         self.mesh_elements = mesh_elements
         self.Neumann_BC = q_all
         self.Dirichlet_BC = p_all
 
-        self.num_nodes = mesh_nodes.shape[0]
-        self.num_elements = mesh_elements.shape[0]
-
+        (v0, e1, e2, a2, n_hat, centroids, areas,
+         node_in_el, char_length) = self._precompute_global(
+             self.mesh_nodes, 
+             self.mesh_elements
+             )
+        
         self.v0 = v0
         self.e1 = e1
         self.e2 = e2
@@ -79,8 +71,18 @@ class Mesh:
         self.centroids = centroids
         self.areas = areas
         self.node_in_el = node_in_el
-        self.node_n_hat = node_n_hat
         self.char_length = char_length
+
+        self.node_normals_angle()
+
+        if q_all is not None and q_all.ndim == 2 and q_all.shape[1] == 3:
+            q_all = np.einsum("ij,ij->i", q_all, self.node_n_hat)
+
+        jump_coefficients = self._compute_jump_coefficients(self.mesh_nodes, 
+                                                            self.mesh_elements, 
+                                                            self.node_in_el, 
+                                                            self.node_n_hat)
+
         self.jump_coefficients = jump_coefficients
 
         self.field_points = self.field.field_points if self.field is not None \
@@ -123,13 +125,6 @@ class Mesh:
         node_in_el = [np.where((mesh_elements == i).any(axis=1))[0]
                       for i in range(mesh_nodes.shape[0])]
 
-        node_n_hat = np.zeros((mesh_nodes.shape[0], 3), float)
-        for e in range(mesh_elements.shape[0]):
-            tri = mesh_elements[e]
-            node_n_hat[tri] += n_hat[e] * areas[e] / 3.0
-        node_n_hat /= (np.linalg.norm(node_n_hat, 
-                                      axis=1)[:, np.newaxis] + 1e-300)
-
         char_length = np.maximum.reduce([
             np.linalg.norm(e1, axis=1),
             np.linalg.norm(e2, axis=1),
@@ -139,7 +134,7 @@ class Mesh:
         return (v0, e1, e2, a2, 
                 n_hat, centroids, 
                 areas, node_in_el, 
-                node_n_hat, char_length)
+                char_length)
 
     def _compute_jump_coefficients(self,
                                    mesh_nodes: np.ndarray,
@@ -226,3 +221,42 @@ class Mesh:
         Dirichlet_BC = np.concatenate(p_blocks) if p_blocks else None
 
         return mesh_nodes, mesh_elements, Neumann_BC, Dirichlet_BC
+    
+    def node_normals_angle(self) -> np.ndarray:
+        """
+        Compute angle-weighted normals at each mesh node and store in
+        self.node_n_hat.
+
+        Each face normal contributes to its three vertices weighted by the
+        interior angle at that vertex. This often produces smoother per-vertex
+        normals on irregular meshes than pure area weighting.
+        """
+        a0, b0 = self.e1, self.e2               
+        a1, b1 = (self.e2 - self.e1), (-self.e1)
+        a2, b2 = (self.e1 - self.e2), (-self.e2)
+
+        ang0 = self._angles(a0, b0)
+        ang1 = self._angles(a1, b1)
+        ang2 = self._angles(a2, b2)
+
+        node_normals = np.zeros((self.num_nodes, 3), dtype=float)
+        idx0 = self.mesh_elements[:, 0]
+        idx1 = self.mesh_elements[:, 1]
+        idx2 = self.mesh_elements[:, 2]
+
+        np.add.at(node_normals, idx0, self.n_hat * ang0[:, None])
+        np.add.at(node_normals, idx1, self.n_hat * ang1[:, None])
+        np.add.at(node_normals, idx2, self.n_hat * ang2[:, None])
+
+        norms = np.linalg.norm(node_normals, axis=1, keepdims=True) + 1e-300
+        node_normals = node_normals / norms
+
+        self.node_n_hat = node_normals
+
+    def _angles(self,
+                u: np.ndarray, 
+                v: np.ndarray) -> np.ndarray:
+        un = u / (np.linalg.norm(u, axis=1, keepdims=True) + 1e-300)
+        vn = v / (np.linalg.norm(v, axis=1, keepdims=True) + 1e-300)
+        cos = np.clip(np.sum(un * vn, axis=1), -1.0, 1.0)
+        return np.arccos(cos)
