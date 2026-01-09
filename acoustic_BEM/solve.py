@@ -194,18 +194,10 @@ class BEMSolver:
             else:
                 C = np.diag(jump_coeff)
 
-        if alpha is None:
-            ialpha = 1j / max(float(self.mesh.k), 1.0)
-        else:
-            if not np.iscomplexobj(alpha):
-                ialpha = 1j * alpha
-            else:
-                ialpha = alpha
-
         if bc_type == "Neumann":
             q = bc_values.astype(complex, copy=False)
-            A = (D - C) + ialpha * N
-            rhs = (S + ialpha * (C + Kp)) @ q
+            A = (D - C) + alpha * N
+            rhs = (S + alpha * (C + Kp)) @ q
             phi = np.linalg.solve(A, rhs)
             self.potential_BC = phi
             self.velocity_BC = bc_values
@@ -213,8 +205,8 @@ class BEMSolver:
 
         if bc_type == "Dirichlet":
             phi = bc_values.astype(complex, copy=False)
-            A = S + ialpha * (C + Kp)
-            rhs = (D - C + ialpha * N) @ phi
+            A = S + alpha * (C + Kp)
+            rhs = (D - C + alpha * N) @ phi
             q = np.linalg.solve(A, rhs)
             self.velocity_BC = q
             self.potential_BC = bc_values
