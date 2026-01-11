@@ -29,15 +29,6 @@ class _CollocationCache:
 
         self.N_reg = shape_functions_P1(self.xi_eta_reg) 
 
-        self._y_reg = None
-        self._w_reg_phys = None
-
-        self._telles = {}
-        self._duffy  = {}
-
-    def ensure_regular_mapped(self):
-        if self._y_reg is not None:
-            return
         xi = self.xi_eta_reg; w = self.w_reg
         yq, a2 = map_to_physical_triangle_batch(
             xi, self.m.v0, self.m.e1, self.m.e2
@@ -45,9 +36,12 @@ class _CollocationCache:
         self._y_reg = yq
         self._w_reg_phys = (w[None, :] * a2[:, None])
 
+        self._telles = {}
+        self._duffy  = {}
+
     def get_regular(self, 
                     elem_idx: np.ndarray):
-        self.ensure_regular_mapped()
+
         return (self._y_reg[elem_idx], 
                 self._w_reg_phys[elem_idx], 
                 self.N_reg)
@@ -76,10 +70,7 @@ class _CollocationCache:
         if key not in self._duffy:
 
             conn = self.m.mesh_elements[elem]
-            try:
-                loc = int(np.where(conn == node_idx)[0][0])
-            except Exception:
-                loc = 0  # fallback
+            loc = int(np.where(conn == node_idx)[0][0])
             xi_eta, w = duffy_rule(n_leg=10, sing_vert_int=loc)
             yq, a2 = map_to_physical_triangle_batch(xi_eta,
                                                     self.m.v0[elem:elem+1],
