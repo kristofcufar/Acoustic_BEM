@@ -1,13 +1,11 @@
 import numpy as np
 
 from acoustic_BEM.kernels import (G, dG_dn_y, 
-                                  dG_dr, r_vec, 
-                                  reflect_points, reflect_vectors)
+                                  dG_dr, r_vec)
 from acoustic_BEM.quadrature import (standard_triangle_quad, 
-                               map_to_physical_triangle, 
+                               map_to_physical_triangle_batch,
                                shape_functions_P1)
-from acoustic_BEM.matrix_assembly import (CollocationAssembler, 
-                                    GalerkinAssembler)
+from acoustic_BEM.matrix_assembly import CollocationAssembler
 
 from tqdm.notebook import tqdm
 
@@ -24,16 +22,14 @@ class BEMSolver:
             for building matrices.
     """
 
-    def __init__(self, assembler: CollocationAssembler | GalerkinAssembler):
+    def __init__(self, assembler: CollocationAssembler):
         """Initialize the solver.
 
         Args:
-            assembler (CollocationAssembler | GalerkinAssembler): Collocation 
-                or Galerkin assembler.
+            assembler (CollocationAssembler): Collocation assembler.
         """
         self.assembler = assembler
         self.mesh = assembler.mesh
-        self.is_galerkin = isinstance(assembler, GalerkinAssembler)
 
 
     def assemble_matrices(self, 
@@ -95,26 +91,13 @@ class BEMSolver:
         S = matrices["S"]
         D = matrices["D"]
 
-        if self.is_galerkin:
-            C = self.assembler.assemble("M")
-
+        if jump_coeff is None:
+            try:
+                C = np.diag(self.mesh.jump_coefficients)
+            except AttributeError:
+                C = 0.5 * np.eye(self.mesh.num_nodes)
         else:
-            if jump_coeff is None:
-                try:
-                    C = np.diag(self.mesh.jump_coefficients)
-                except AttributeError:
-                    C = 0.5 * np.eye(self.mesh.num_nodes)
-            else:
-                C = np.diag(jump_coeff)
-
-        if bc_type == "Dirichlet":            
-            phi = bc_values
-            A = S
-            rhs = (D - C) @ phi
-            sol = np.linalg.solve(A, rhs)
-            self.velocity_BC = sol
-            self.potential_BC = bc_values
-            return sol
+            C = np.diag(jump_coeff)
 
         if bc_type == "Neumann":
             q = bc_values
@@ -124,11 +107,20 @@ class BEMSolver:
             self.potential_BC = sol
             self.velocity_BC = bc_values
             return sol
+
+        if bc_type == "Dirichlet":            
+            phi = bc_values
+            A = S
+            rhs = (D - C) @ phi
+            sol = np.linalg.solve(A, rhs)
+            self.velocity_BC = sol
+            self.potential_BC = bc_values
+            return sol
     
     def solve_burton_miller(self,
                             matrices: dict[str, np.ndarray] | None = None,
                             jump_coeff: np.ndarray | None = None,
-                            alpha: float | None = None,
+                            alpha: complex = 1j,
                             ) -> np.ndarray:
         """
         Solve the BIE via the Burton–Miller combined formulation.
@@ -137,8 +129,8 @@ class BEMSolver:
         and its normal-derivative equation to remove spurious resonances.
 
         The combined equation is taken (for exterior problems) in the form:
-            (D - C) φ + i α N φ = S q + i α (C + K') q,
-            [(D - C) + i α N] φ = [S + i α (C + K')] q
+            (D - C) φ + α N φ = S q + α (C + K') q,
+            [(D - C) + α N] φ = [S + α (C + K')] q
 
         where C is the double-layer jump term (typically 0.5·I on closed smooth
         surfaces).
@@ -158,8 +150,7 @@ class BEMSolver:
                 shape (num_nodes,). If None, uses the mesh's jump_coefficients
                 attribute (based on solid angle) if it exists, otherwise 
                 defaults to 0.5.
-            alpha (float | None): Coupling parameter α. If None, defaults to 
-                α = 1j/max(k,1).
+            alpha (complex): Coupling parameter α. Defaults to 1j.
 
         Returns:
             np.ndarray: Solution vector (φ for Neumann input, 
@@ -182,17 +173,13 @@ class BEMSolver:
         Kp = matrices["Kp"]
         N  = matrices["N"]
 
-        if self.is_galerkin:
-            C = self.assembler.assemble("M")
-
+        if jump_coeff is None:
+            try:
+                C = np.diag(self.mesh.jump_coefficients)
+            except AttributeError:
+                C = 0.5 * np.eye(self.mesh.num_nodes)
         else:
-            if jump_coeff is None:
-                try:
-                    C = np.diag(self.mesh.jump_coefficients)
-                except AttributeError:
-                    C = 0.5 * np.eye(self.mesh.num_nodes)
-            else:
-                C = np.diag(jump_coeff)
+            C = np.diag(jump_coeff)
 
         if bc_type == "Neumann":
             q = bc_values.astype(complex, copy=False)
@@ -252,56 +239,32 @@ class BEMSolver:
                 "Dirichlet boundary conditions.")
 
         xi_eta, w = standard_triangle_quad(quad_order)
+        Nq = shape_functions_P1(xi_eta)
+        yq, a2 = map_to_physical_triangle_batch(xi_eta,
+                                               self.mesh.v0, self.mesh.e1, self.mesh.e2)
+        w_phys = w[None, :, None] * a2[:, None, None]
+
+        r_norm, r_hat = r_vec(field_points[:, None, None, :], yq[None, :, :, :])[1:]
+
+        Gvals = G(r_norm, self.mesh.k)
+        dGr = dG_dr(r_norm, Gvals, self.mesh.k)
+
+        ny_b = self.mesh.n_hat[None, :, None, :]
+        dGdnY = dG_dn_y(r_hat, dGr, ny_b)
+
         u = np.zeros(field_points.shape[0], dtype=complex)
 
         for e in tqdm(range(self.mesh.num_elements), 
                       desc="Evaluating pressure field at points",
                       disable = not verbose):
             conn = self.mesh.mesh_elements[e]
-            v0, e1, e2 = self.mesh.v0[e], self.mesh.e1[e], self.mesh.e2[e]
-            ny = self.mesh.n_hat[e]
 
-            yq, a2 = map_to_physical_triangle(xi_eta, v0, e1, e2)
-            w_phys = w * a2
-            Nq = shape_functions_P1(xi_eta)
-            if phi is not None:
-                phi_q = Nq @ phi[conn]
-            if q is not None:
-                q_q = Nq @ q[conn]
+            phi_q = Nq @ phi[conn]
+            q_q = Nq @ q[conn]
 
-            r_norm, r_hat = r_vec(field_points[:, None, :], yq[None, :, :])[1:]
-            Gvals = G(r_norm, self.mesh.k)
+            wq = w_phys[e, :, 0]
 
-            if phi is not None:
-                dGr = dG_dr(r_norm, Gvals, self.mesh.k)
-                ny_b = ny[None, None, :]
-                dGdnY = dG_dn_y(r_hat, dGr, ny_b)
-                u += np.sum(dGdnY * (phi_q[None, :] * w_phys[None, :]), axis=1)
-            if q is not None:
-                u -= np.sum(Gvals * (q_q[None, :] * w_phys[None, :]), axis=1)
-            
-            if getattr(self.assembler.integrator, 
-                       "kernel_mode") == "halfspace_neumann":
-                plane_point  = self.assembler.integrator.plane_point
-                plane_normal = self.assembler.integrator.plane_normal
-
-                y_img  = reflect_points(yq, plane_point, plane_normal)
-                ny_img = reflect_vectors(ny[None, :], plane_normal)[0]
-
-                r_norm_img, r_hat_img = r_vec(field_points[:, None, :], 
-                                                 y_img[None, :, :])[1:]
-                Gvals_img = G(r_norm_img, self.mesh.k)
-
-                if phi is not None:
-                    dGr_img = dG_dr(r_norm_img, Gvals_img, self.mesh.k)
-                    ny_img_b = ny_img[None, None, :]
-                    dGdnY_img = dG_dn_y(r_hat_img, dGr_img, ny_img_b)
-                    u += np.sum(dGdnY_img * (phi_q[None, :] * w_phys[None, :]), 
-                                axis=1)
-
-                if q is not None:
-                    u -= np.sum(Gvals_img * (q_q[None, :] * w_phys[None, :]), 
-                                axis=1)
-
+            u += np.sum(dGdnY[:, e, :] * (phi_q[None, :] * wq[None, :]), axis=1)
+            u -= np.sum(Gvals[:, e, :] * (q_q[None, :] * wq[None, :]), axis=1)
 
         return u
