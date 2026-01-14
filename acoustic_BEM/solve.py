@@ -158,7 +158,7 @@ class BEMSolver:
         """
 
         if matrices is None:
-            matrices = self.assemble_matrices(ops=("S","D","Kp","N"))
+            matrices = self.assemble_matrices(ops=("S","D","Kp","NReg"))
 
         if self.mesh.Dirichlet_BC is not None:
             bc_type = "Dirichlet"
