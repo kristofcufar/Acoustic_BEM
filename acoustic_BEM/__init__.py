@@ -5,10 +5,8 @@ Boundary Element Method for Exterior Acoustic problems
 __version__ = "0.0.1"
 from .geometry import Body, Field, box_mesh
 from .mesh import Mesh
-from .integrators import (ElementIntegratorCollocation, 
-                          ElementIntegratorGalerkin)
-from .matrix_assembly import (CollocationAssembler, 
-                              GalerkinAssembler)
+from .integrators import (ElementIntegratorCollocation)
+from .matrix_assembly import (CollocationAssembler)
 from .solve import BEMSolver
 
 from .kernels import (r_vec, G, dG_dr, 
@@ -16,6 +14,6 @@ from .kernels import (r_vec, G, dG_dr,
                           d2G_dn_x_dn_y)
 
 __all__ = ["Mesh", "BEMSolver",
-            "CollocationAssembler", "GalerkinAssembler", 
-            "ElementIntegratorCollocation", "ElementIntegratorGalerkin"]
+            "CollocationAssembler", 
+            "ElementIntegratorCollocation"]
 __version__ = "0.0.0"

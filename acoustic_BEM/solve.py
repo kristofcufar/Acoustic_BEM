@@ -18,7 +18,7 @@ class BEMSolver:
     solution of the linear system.
 
     Attributes:
-        assembler (CollocationAssembler | GalerkinAssembler): Assembler object 
+        assembler (CollocationAssembler): Assembler object 
             for building matrices.
     """
 
