@@ -9,7 +9,9 @@ from acoustic_BEM.quadrature import (standard_triangle_quad,
                                map_to_physical_triangle_batch)
 
 from acoustic_BEM.mesh import Mesh
+from acoustic_BEM.elements import ContinuousP1Mesh, DiscontinuousP1Mesh
 from acoustic_BEM.integrators import ElementIntegratorCollocation
+
 
 class _CollocationCache:
     """
@@ -80,9 +82,10 @@ class _CollocationCache:
             self._duffy[key] = (yq[0], w * a2[0], Nq)
         return self._duffy[key]
 
-class CollocationAssembler:
+
+class ContinuousAssembler:
     """
-    Collocation BEM assembler for the four boundary operators.
+    Collocation BEM assembler for continuous P1 elements.
 
     This class computes collocation matrices for:
 
@@ -94,33 +97,44 @@ class CollocationAssembler:
 
     The assembler holds the mesh and integrator so that expensive data
     (geometry, connectivity, etc.) is reused across operators.
+    
+    This is your original CollocationAssembler, renamed for clarity.
     """
 
     def __init__(self,
-                 mesh: Mesh,
+                 mesh: ContinuousP1Mesh | Mesh,
                  integrator: ElementIntegratorCollocation,
                  quad_order: int = 3,
                  near_threshold: float = 2.0):
         """
-        Initialize the collocation assembler.
+        Initialize the continuous collocation assembler.
 
         Args:
-            mesh (Mesh): Geometry and discretization data.
+            mesh (ContinuousP1Mesh | Mesh): Geometry and discretization data.
+                Can accept either the new wrapper or legacy Mesh object.
             integrator (ElementIntegratorCollocation): Local integration engine.
             quad_order (int, optional): Order of standard triangle quadrature.
                 Defaults to 3.
             near_threshold (float, optional): Distance factor for near-singular
                 detection. Defaults to 2.0.
         """
-        self.mesh = mesh
+        # Handle both legacy Mesh and new ContinuousP1Mesh
+        if isinstance(mesh, ContinuousP1Mesh):
+            self.element_mesh = mesh
+            self.mesh = mesh.mesh
+        else:
+            # Legacy support: wrap bare Mesh object
+            self.element_mesh = ContinuousP1Mesh(mesh)
+            self.mesh = mesh
+            
         self.integrator = integrator
         self.quad_order = quad_order
         self.near_threshold = near_threshold
 
-        self.Nn = mesh.num_nodes
-        self.Ne = mesh.num_elements
+        self.Nn = self.mesh.num_nodes
+        self.Ne = self.mesh.num_elements
 
-        self.cache = _CollocationCache(mesh, quad_order)
+        self.cache = _CollocationCache(self.mesh, quad_order)
 
     def assemble(self, operator: str, verbose: bool = True) -> np.ndarray:
         """
@@ -128,6 +142,7 @@ class CollocationAssembler:
 
         Args:
             operator (str): One of ``{"S", "D", "Kp", "N", "NReg"}``.
+            verbose (bool): Show progress bar if True.
 
         Returns:
             np.ndarray: Dense matrix of shape (num_nodes, num_nodes) containing
@@ -315,3 +330,300 @@ class CollocationAssembler:
         near = np.setdiff1d(near, singular)
         regular = np.setdiff1d(np.arange(self.Ne), np.union1d(singular, near))
         return singular, near, regular
+
+
+# For backward compatibility, keep old name as alias
+CollocationAssembler = ContinuousAssembler
+
+
+class DiscontinuousAssembler:
+    """
+    Collocation BEM assembler for discontinuous P1 elements.
+    
+    Key differences from continuous assembler:
+    - Collocation points are interior to elements (no singular integrals)
+    - System size is 3M × 3M (M = num_elements)
+    - No need for Duffy quadrature (collocation points avoid vertices)
+    - Telles quadrature still used for near-singular integrals
+    
+    Supports the same operators: S, D, Kp, N, NReg
+    """
+    
+    def __init__(self,
+                 mesh: DiscontinuousP1Mesh,
+                 integrator: ElementIntegratorCollocation,
+                 quad_order: int = 3,
+                 near_threshold: float = 2.0):
+        """
+        Initialize the discontinuous collocation assembler.
+        
+        Args:
+            mesh (DiscontinuousP1Mesh): Discontinuous element mesh.
+            integrator (ElementIntegratorCollocation): Local integration engine.
+            quad_order (int): Order of standard triangle quadrature. Default 3.
+            near_threshold (float): Distance factor for near-singular detection.
+                Default 2.0.
+        """
+        self.element_mesh = mesh
+        self.mesh = mesh.mesh  # Base geometric mesh
+        self.integrator = integrator
+        self.quad_order = quad_order
+        self.near_threshold = near_threshold
+        
+        self.num_dofs = mesh.num_dofs
+        self.num_elements = mesh.num_elements
+        self.num_collocation = mesh.get_num_collocation_points()
+        
+        # Pre-compute quadrature on all elements
+        self.xi_eta_reg, self.w_reg = standard_triangle_quad(quad_order)
+        self.N_reg = shape_functions_P1(self.xi_eta_reg)
+        
+        yq, a2 = map_to_physical_triangle_batch(
+            self.xi_eta_reg, self.mesh.v0, self.mesh.e1, self.mesh.e2
+        )
+        self._y_reg = yq
+        self._w_reg_phys = self.w_reg[None, :] * a2[:, None]
+        
+        # Cache for Telles quadrature
+        self._telles_cache = {}
+        
+    def assemble(self, operator: str, verbose: bool = True) -> np.ndarray:
+        """
+        Assemble the collocation matrix for a boundary operator.
+        
+        Args:
+            operator (str): One of {"S", "D", "Kp", "N", "NReg"}
+            verbose (bool): Show progress bar if True
+            
+        Returns:
+            np.ndarray: Dense matrix of shape (num_collocation, num_dofs)
+                For interior_shifted: (3M, 3M)
+                For centroid: (M, 3M) - overdetermined
+        """
+        if operator not in {"S", "D", "Kp", "N", "NReg"}:
+            raise ValueError(f"Unknown operator: {operator}")
+            
+        A = np.zeros((self.num_collocation, self.num_dofs), dtype=np.complex128)
+        
+        # Handle different collocation strategies
+        if self.element_mesh.collocation_strategy == "centroid":
+            self._assemble_centroid(A, operator, verbose)
+        else:
+            self._assemble_interior_shifted(A, operator, verbose)
+            
+        return A
+    
+    def _assemble_interior_shifted(self, 
+                                   A: np.ndarray, 
+                                   operator: str,
+                                   verbose: bool):
+        """
+        Assembly for interior_shifted and vertex collocation strategies.
+        
+        Each DOF has its own collocation point.
+        """
+        for dof_idx in tqdm(range(self.num_dofs),
+                           desc=f"Assembling {operator} (discontinuous)",
+                           disable=not verbose):
+            x, n_x = self.element_mesh.get_collocation_point(dof_idx=dof_idx)
+            
+            # Classify elements (no singular elements since collocation is interior)
+            near, regular = self._classify_elements_discontinuous(x)
+            
+            # Process near elements with Telles quadrature
+            for elem in near:
+                xi_eta, w = self._get_telles_quad(x, elem)
+                
+                if operator == "NReg":
+                    row = self._call_integrator(operator, x, n_x,
+                                               np.array([elem]),
+                                               xi_eta, w, None, None)
+                else:
+                    yq, a2 = map_to_physical_triangle_batch(
+                        xi_eta,
+                        self.mesh.v0[elem:elem+1],
+                        self.mesh.e1[elem:elem+1],
+                        self.mesh.e2[elem:elem+1]
+                    )
+                    w_phys = w * a2[0]
+                    Nq = shape_functions_P1(xi_eta)
+                    n_y = self.mesh.n_hat[elem:elem+1] if operator in {"D", "N"} \
+                        else None
+                    
+                    row = self._call_integrator(operator, x, n_x,
+                                               np.array([elem]),
+                                               yq[0][None, :, :],
+                                               w_phys[None, :],
+                                               Nq, n_y)
+                
+                # Add to matrix
+                dof_indices = self.element_mesh.get_dof_in_element(elem)
+                for local_dof, global_dof in enumerate(dof_indices):
+                    A[dof_idx, global_dof] += row[0, local_dof]
+            
+            # Process regular elements with standard quadrature
+            if len(regular) > 0:
+                if operator == "NReg":
+                    xi_eta, w = standard_triangle_quad(self.quad_order)
+                    vals = self._call_integrator(operator, x, n_x,
+                                                regular, xi_eta, w, None, None)
+                else:
+                    y_phys = self._y_reg[regular]
+                    w_phys = self._w_reg_phys[regular]
+                    n_y = self.mesh.n_hat[regular] if operator in {"D", "N"} \
+                        else None
+                    
+                    vals = self._call_integrator(operator, x, n_x, regular,
+                                                y_phys, w_phys, self.N_reg, n_y)
+                
+                # Add to matrix
+                for elem_idx, row in zip(regular, vals):
+                    dof_indices = self.element_mesh.get_dof_in_element(elem_idx)
+                    for local_dof, global_dof in enumerate(dof_indices):
+                        A[dof_idx, global_dof] += row[local_dof]
+    
+    def _assemble_centroid(self, 
+                          A: np.ndarray, 
+                          operator: str,
+                          verbose: bool):
+        """
+        Assembly for centroid collocation strategy.
+        
+        One collocation point per element at centroid.
+        Results in overdetermined M × 3M system.
+        """
+        for elem_idx in tqdm(range(self.num_elements),
+                            desc=f"Assembling {operator} (discontinuous-centroid)",
+                            disable=not verbose):
+            x, n_x = self.element_mesh.get_collocation_point(elem_idx=elem_idx)
+            
+            near, regular = self._classify_elements_discontinuous(x)
+            
+            # Process all elements (near and regular)
+            all_elems = np.concatenate([near, regular]) if len(near) > 0 else regular
+            
+            for elem in all_elems:
+                # Use Telles for near, standard for regular
+                if elem in near:
+                    xi_eta, w = self._get_telles_quad(x, elem)
+                    yq, a2 = map_to_physical_triangle_batch(
+                        xi_eta,
+                        self.mesh.v0[elem:elem+1],
+                        self.mesh.e1[elem:elem+1],
+                        self.mesh.e2[elem:elem+1]
+                    )
+                    w_phys = w * a2[0]
+                    Nq = shape_functions_P1(xi_eta)
+                else:
+                    yq = self._y_reg[elem:elem+1]
+                    w_phys = self._w_reg_phys[elem:elem+1]
+                    Nq = self.N_reg
+                
+                n_y = self.mesh.n_hat[elem:elem+1] if operator in {"D", "N", "NReg"} \
+                    else None
+                
+                if operator == "NReg":
+                    if elem in near:
+                        xi_eta, w = self._get_telles_quad(x, elem)
+                    else:
+                        xi_eta, w = standard_triangle_quad(self.quad_order)
+                    row = self._call_integrator(operator, x, n_x,
+                                               np.array([elem]),
+                                               xi_eta, w, None, n_y)
+                else:
+                    row = self._call_integrator(operator, x, n_x,
+                                               np.array([elem]),
+                                               yq[0][None, :, :] if elem in near 
+                                               else yq,
+                                               w_phys[None, :] if elem in near 
+                                               else w_phys,
+                                               Nq, n_y)
+                
+                dof_indices = self.element_mesh.get_dof_in_element(elem)
+                for local_dof, global_dof in enumerate(dof_indices):
+                    A[elem_idx, global_dof] += row[0, local_dof]
+    
+    def _classify_elements_discontinuous(self, 
+                                        x: np.ndarray) -> tuple[np.ndarray, 
+                                                                np.ndarray]:
+        """
+        Classify elements as near or regular (no singular elements).
+        
+        Args:
+            x (np.ndarray): Collocation point, shape (3,)
+            
+        Returns:
+            tuple: (near_elements, regular_elements)
+        """
+        d = np.linalg.norm(self.mesh.centroids - x, axis=1)
+        near = np.where(d < self.near_threshold * self.mesh.char_length)[0]
+        regular = np.setdiff1d(np.arange(self.num_elements), near)
+        return near, regular
+    
+    def _get_telles_quad(self, 
+                        x: np.ndarray, 
+                        elem: int) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Get or compute Telles quadrature for near-singular element.
+        
+        Args:
+            x (np.ndarray): Collocation point
+            elem (int): Element index
+            
+        Returns:
+            tuple: (xi_eta, weights)
+        """
+        # Create cache key from position and element
+        key = (tuple(x), elem)
+        
+        if key not in self._telles_cache:
+            xi_star, eta_star = barycentric_projection(
+                x, self.mesh.v0[elem], self.mesh.e1[elem], self.mesh.e2[elem]
+            )
+            xi_eta, w = telles_rule(u_star=xi_star, v_star=eta_star, n_leg=10)
+            self._telles_cache[key] = (xi_eta, w)
+            
+        return self._telles_cache[key]
+    
+    def _call_integrator(self,
+                        operator: str,
+                        x: np.ndarray,
+                        n_x: np.ndarray | None,
+                        elem_idx: np.ndarray,
+                        xi_eta: np.ndarray,
+                        w: np.ndarray,
+                        Nq: np.ndarray | None,
+                        n_y: np.ndarray | None = None) -> np.ndarray:
+        """
+        Dispatch to the correct integrator method.
+        
+        Same signature as ContinuousAssembler.call_integrator
+        """
+        if operator == "S":
+            return self.integrator.single_layer(x=x, y_phys=xi_eta,
+                                               w_phys=w, N=Nq)
+        if operator == "D":
+            if n_y is None:
+                raise ValueError("n_y required for double-layer operator")
+            return self.integrator.double_layer(x=x, y_phys=xi_eta,
+                                               w_phys=w, N=Nq, n_y=n_y)
+        if operator == "Kp":
+            return self.integrator.adjoint_double_layer(x=x, x_normal=n_x,
+                                                       y_phys=xi_eta,
+                                                       w_phys=w, N=Nq)
+        if operator == "N":
+            if n_y is None:
+                raise ValueError("n_y required for hypersingular operator")
+            return self.integrator.hypersingular_layer(x=x, x_normal=n_x,
+                                                      y_phys=xi_eta,
+                                                      w_phys=w, N=Nq, n_y=n_y)
+        if operator == "NReg":
+            return self.integrator.hypersingular_layer_reg(
+                x=x, x_normal=n_x,
+                y_v0=self.mesh.v0[elem_idx],
+                y_e1=self.mesh.e1[elem_idx],
+                y_e2=self.mesh.e2[elem_idx],
+                y_normals=self.mesh.n_hat[elem_idx],
+                xi_eta=xi_eta, w=w
+            )
+        raise ValueError(f"Unsupported operator: {operator}")

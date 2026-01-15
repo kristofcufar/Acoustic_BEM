@@ -5,7 +5,8 @@ from acoustic_BEM.kernels import (G, dG_dn_y,
 from acoustic_BEM.quadrature import (standard_triangle_quad, 
                                map_to_physical_triangle_batch,
                                shape_functions_P1)
-from acoustic_BEM.matrix_assembly import CollocationAssembler
+from acoustic_BEM.matrix_assembly import ContinuousAssembler, DiscontinuousAssembler
+from acoustic_BEM.elements import ContinuousP1Mesh, DiscontinuousP1Mesh
 
 from tqdm.notebook import tqdm
 
@@ -15,43 +16,67 @@ class BEMSolver:
     Boundary Element Method solver for acoustic problems.
 
     Handles matrix assembly, application of boundary conditions, and
-    solution of the linear system.
+    solution of the linear system for both continuous and discontinuous
+    element formulations.
 
     Attributes:
-        assembler (CollocationAssembler): Assembler object 
-            for building matrices.
+        assembler (ContinuousAssembler | DiscontinuousAssembler): Assembler 
+            object for building matrices.
+        element_type (str): Type of elements ("continuous_p1" or 
+            "discontinuous_p1")
     """
 
-    def __init__(self, assembler: CollocationAssembler):
+    def __init__(self, assembler: ContinuousAssembler | DiscontinuousAssembler):
         """Initialize the solver.
 
         Args:
-            assembler (CollocationAssembler): Collocation assembler.
+            assembler (ContinuousAssembler | DiscontinuousAssembler): 
+                Collocation assembler for either continuous or discontinuous 
+                elements.
         """
         self.assembler = assembler
+        self.element_mesh = assembler.element_mesh
         self.mesh = assembler.mesh
-
+        
+        # Detect element type
+        if isinstance(assembler, DiscontinuousAssembler):
+            self.element_type = "discontinuous_p1"
+            self.is_discontinuous = True
+        else:
+            self.element_type = "continuous_p1"
+            self.is_discontinuous = False
+            
+        # Check for overdetermined system (centroid collocation)
+        if self.is_discontinuous:
+            self.is_overdetermined = (
+                self.element_mesh.collocation_strategy == "centroid"
+            )
+        else:
+            self.is_overdetermined = False
 
     def assemble_matrices(self, 
                           ops: tuple[str, ...] = ("S","D","Kp","N", "NReg"),
+                          verbose: bool = True,
                           ) -> dict[str, np.ndarray]:
         """
         Assemble selected operator matrices.
 
         Args:
             ops (tuple[str, ...]): Any subset of {"S","D","Kp","N", "NReg"}.
+            verbose (bool): Show progress bars if True.
 
         Returns:
             dict[str, np.ndarray]: Assembled matrices.
         """
         A: dict[str, np.ndarray] = {}
         for op in ops:
-            A[op] = self.assembler.assemble(op)
+            A[op] = self.assembler.assemble(op, verbose=verbose)
         return A
 
     def solve_direct(self,
                      matrices: dict[str, np.ndarray] | None = None,
-                     jump_coeff: np.ndarray | None = None) -> np.ndarray:
+                     jump_coeff: np.ndarray | None = None,
+                     verbose: bool = True) -> np.ndarray:
         """
         Solve equation:
 
@@ -62,57 +87,65 @@ class BEMSolver:
         - bc_type="Dirichlet": given φ on Γ, solve for q = ∂φ/∂n on Γ
         - bc_type="Neumann": given q = ∂φ/∂n on Γ, solve for φ on Γ
 
-
-
         Args:
             matrices (dict[str, np.ndarray] | None): Pre-assembled operator 
                 matrices {"S","D"}. If None, assembles them.
-            jump_coeff (np.ndarray | None): Jump coefficients at nodes,
-                shape (num_nodes,). If None, uses the mesh's jump_coefficients
-                attribute (based on solid angle) if it exists, otherwise 
-                defaults to 0.5.
+            jump_coeff (np.ndarray | None): Jump coefficients at collocation
+                points. If None, uses mesh's jump_coefficients or defaults 
+                to 0.5.
+            verbose (bool): Show progress information.
 
         Returns:
             np.ndarray: Solution vector for the unknown boundary quantity
-            at mesh nodes.
+                at DOF nodes.
         """
         if matrices is None:
-            matrices = self.assemble_matrices(ops=("S","D"))
+            matrices = self.assemble_matrices(ops=("S","D"), verbose=verbose)
 
+        # Determine boundary condition type
         if self.mesh.Dirichlet_BC is not None:
             bc_type = "Dirichlet"
-            bc_values = self.mesh.Dirichlet_BC
+            bc_values_geom = self.mesh.Dirichlet_BC
         elif self.mesh.Neumann_BC is not None:
             bc_type = "Neumann"
-            bc_values = self.mesh.Neumann_BC
+            bc_values_geom = self.mesh.Neumann_BC
         else:
             raise ValueError("No boundary condition values provided.")
+        
+        # Map BC to DOF structure
+        bc_values = self._map_bc_to_dofs(bc_values_geom)
             
         S = matrices["S"]
         D = matrices["D"]
 
-        if jump_coeff is None:
-            try:
-                C = np.diag(self.mesh.jump_coefficients)
-            except AttributeError:
-                C = 0.5 * np.eye(self.mesh.num_nodes)
-        else:
-            C = np.diag(jump_coeff)
+        # Build jump coefficient matrix
+        C = self._build_jump_matrix(jump_coeff)
 
+        # Solve system
         if bc_type == "Neumann":
             q = bc_values
-            A = D - C
+            A_sys = D - C
             rhs = S @ q
-            sol = np.linalg.solve(A, rhs)
+            
+            if self.is_overdetermined:
+                sol, _, _, _ = np.linalg.lstsq(A_sys, rhs, rcond=None)
+            else:
+                sol = np.linalg.solve(A_sys, rhs)
+                
             self.potential_BC = sol
             self.velocity_BC = bc_values
             return sol
 
         if bc_type == "Dirichlet":            
             phi = bc_values
-            A = S
+            A_sys = S
             rhs = (D - C) @ phi
-            sol = np.linalg.solve(A, rhs)
+            
+            if self.is_overdetermined:
+                sol, _, _, _ = np.linalg.lstsq(A_sys, rhs, rcond=None)
+            else:
+                sol = np.linalg.solve(A_sys, rhs)
+                
             self.velocity_BC = sol
             self.potential_BC = bc_values
             return sol
@@ -121,6 +154,7 @@ class BEMSolver:
                             matrices: dict[str, np.ndarray] | None = None,
                             jump_coeff: np.ndarray | None = None,
                             alpha: complex = 1j,
+                            verbose: bool = True,
                             ) -> np.ndarray:
         """
         Solve the BIE via the Burton–Miller combined formulation.
@@ -145,12 +179,12 @@ class BEMSolver:
 
         Args:
             matrices (dict[str, np.ndarray] | None): Pre-assembled operator 
-                matrices {"S","D","Kp","N"}. If None, assembles them.
-            jump_coeff (np.ndarray | None): Jump coefficients at nodes,
-                shape (num_nodes,). If None, uses the mesh's jump_coefficients
-                attribute (based on solid angle) if it exists, otherwise 
-                defaults to 0.5.
+                matrices {"S","D","Kp","NReg"}. If None, assembles them.
+            jump_coeff (np.ndarray | None): Jump coefficients at collocation
+                points. If None, uses mesh's jump_coefficients or defaults 
+                to 0.5.
             alpha (complex): Coupling parameter α. Defaults to 1j.
+            verbose (bool): Show progress information.
 
         Returns:
             np.ndarray: Solution vector (φ for Neumann input, 
@@ -158,43 +192,54 @@ class BEMSolver:
         """
 
         if matrices is None:
-            matrices = self.assemble_matrices(ops=("S","D","Kp","NReg"))
+            matrices = self.assemble_matrices(ops=("S","D","Kp","NReg"), 
+                                             verbose=verbose)
 
+        # Determine boundary condition type
         if self.mesh.Dirichlet_BC is not None:
             bc_type = "Dirichlet"
-            bc_values = self.mesh.Dirichlet_BC
-
+            bc_values_geom = self.mesh.Dirichlet_BC
         elif self.mesh.Neumann_BC is not None:
             bc_type = "Neumann"
-            bc_values = self.mesh.Neumann_BC
+            bc_values_geom = self.mesh.Neumann_BC
+        else:
+            raise ValueError("No boundary condition values provided.")
+
+        # Map BC to DOF structure
+        bc_values = self._map_bc_to_dofs(bc_values_geom)
 
         S = matrices["S"]
         D = matrices["D"]
         Kp = matrices["Kp"]
-        N  = matrices["N"]
+        N  = matrices["NReg"]  # Use regularized hypersingular
 
-        if jump_coeff is None:
-            try:
-                C = np.diag(self.mesh.jump_coefficients)
-            except AttributeError:
-                C = 0.5 * np.eye(self.mesh.num_nodes)
-        else:
-            C = np.diag(jump_coeff)
+        # Build jump coefficient matrix
+        C = self._build_jump_matrix(jump_coeff)
 
         if bc_type == "Neumann":
             q = bc_values.astype(complex, copy=False)
-            A = (D - C) + alpha * N
+            A_sys = (D - C) + alpha * N
             rhs = (S + alpha * (C + Kp)) @ q
-            phi = np.linalg.solve(A, rhs)
+            
+            if self.is_overdetermined:
+                phi, _, _, _ = np.linalg.lstsq(A_sys, rhs, rcond=None)
+            else:
+                phi = np.linalg.solve(A_sys, rhs)
+                
             self.potential_BC = phi
             self.velocity_BC = bc_values
             return phi
 
         if bc_type == "Dirichlet":
             phi = bc_values.astype(complex, copy=False)
-            A = S + alpha * (C + Kp)
+            A_sys = S + alpha * (C + Kp)
             rhs = (D - C + alpha * N) @ phi
-            q = np.linalg.solve(A, rhs)
+            
+            if self.is_overdetermined:
+                q, _, _, _ = np.linalg.lstsq(A_sys, rhs, rcond=None)
+            else:
+                q = np.linalg.solve(A_sys, rhs)
+                
             self.velocity_BC = q
             self.potential_BC = bc_values
             return q
@@ -210,14 +255,18 @@ class BEMSolver:
         """
         Evaluate the potential at domain points using boundary solution.
 
+        For discontinuous elements, the solution at DOFs is automatically
+        interpolated within each element using P1 shape functions.
+
         Args:
             field_points (np.ndarray): Array of M points, shape (M,3).
-            phi (np.ndarray | None): Boundary potential at nodes, shape (N,), 
-                or None.
-            q (np.ndarray | None): Boundary normal derivative at nodes, shape 
-                (N,), or None.
+            phi (np.ndarray | None): Boundary potential at DOF nodes, 
+                shape (num_dofs,), or None.
+            q (np.ndarray | None): Boundary normal derivative at DOF nodes, 
+                shape (num_dofs,), or None.
             quad_order (int, optional): Triangle quadrature order. 
                 Defaults to 3.
+            verbose (bool): Show progress bar.
 
         Returns:
             np.ndarray: Complex potential at field points, shape (M,).
@@ -226,25 +275,30 @@ class BEMSolver:
             try: 
                 phi = self.potential_BC
             except AttributeError:
-                raise ValueError("Boundary potential not found. Provide as " \
-                "Dirichlet BC or run solve_direct to compute from Neumann " \
+                raise ValueError("Boundary potential not found. Provide as " 
+                "Dirichlet BC or run solve_direct to compute from Neumann " 
                 "boundary conditions.")
             
         if q is None:
             try:
                 q = self.velocity_BC
             except AttributeError:
-                raise ValueError("Boundary normal derivative not found. " \
-                "Provide as Neumann BC or run solve_direct to compute from " \
+                raise ValueError("Boundary normal derivative not found. " 
+                "Provide as Neumann BC or run solve_direct to compute from " 
                 "Dirichlet boundary conditions.")
 
+        # Set up quadrature
         xi_eta, w = standard_triangle_quad(quad_order)
         Nq = shape_functions_P1(xi_eta)
         yq, a2 = map_to_physical_triangle_batch(xi_eta,
-                                               self.mesh.v0, self.mesh.e1, self.mesh.e2)
+                                               self.mesh.v0, 
+                                               self.mesh.e1, 
+                                               self.mesh.e2)
         w_phys = w[None, :, None] * a2[:, None, None]
 
-        r_norm, r_hat = r_vec(field_points[:, None, None, :], yq[None, :, :, :])[1:]
+        # Compute kernels
+        r_norm, r_hat = r_vec(field_points[:, None, None, :], 
+                             yq[None, :, :, :])[1:]
 
         Gvals = G(r_norm, self.mesh.k)
         dGr = dG_dr(r_norm, Gvals, self.mesh.k)
@@ -254,17 +308,121 @@ class BEMSolver:
 
         u = np.zeros(field_points.shape[0], dtype=complex)
 
+        # Integrate over elements
         for e in tqdm(range(self.mesh.num_elements), 
                       desc="Evaluating pressure field at points",
                       disable = not verbose):
-            conn = self.mesh.mesh_elements[e]
+            
+            # Get DOF values for this element
+            if self.is_discontinuous:
+                dof_indices = self.element_mesh.get_dof_in_element(e)
+                phi_elem = phi[dof_indices]
+                q_elem = q[dof_indices]
+            else:
+                # Continuous elements: DOFs are node indices
+                conn = self.mesh.mesh_elements[e]
+                phi_elem = phi[conn]
+                q_elem = q[conn]
 
-            phi_q = Nq @ phi[conn]
-            q_q = Nq @ q[conn]
+            # Interpolate to quadrature points using shape functions
+            phi_q = Nq @ phi_elem
+            q_q = Nq @ q_elem
 
             wq = w_phys[e, :, 0]
 
+            # Accumulate contributions
             u += np.sum(dGdnY[:, e, :] * (phi_q[None, :] * wq[None, :]), axis=1)
             u -= np.sum(Gvals[:, e, :] * (q_q[None, :] * wq[None, :]), axis=1)
 
         return u
+    
+    def get_solution_at_geometric_nodes(self,
+                                       solution_type: str = "potential"
+                                       ) -> np.ndarray:
+        """
+        Get the solution mapped to geometric mesh nodes.
+        
+        For continuous elements, this is identity.
+        For discontinuous elements, averages DOF values at shared vertices.
+        
+        Args:
+            solution_type (str): Either "potential" or "velocity"
+            
+        Returns:
+            np.ndarray: Solution at geometric nodes, shape (N,)
+        """
+        if solution_type == "potential":
+            try:
+                dof_solution = self.potential_BC
+            except AttributeError:
+                raise ValueError("No potential solution available")
+        elif solution_type == "velocity":
+            try:
+                dof_solution = self.velocity_BC
+            except AttributeError:
+                raise ValueError("No velocity solution available")
+        else:
+            raise ValueError("solution_type must be 'potential' or 'velocity'")
+            
+        if self.is_discontinuous:
+            return self.element_mesh.map_dof_to_geometric(dof_solution)
+        else:
+            return dof_solution.copy()
+    
+    def _map_bc_to_dofs(self, bc_geom: np.ndarray) -> np.ndarray:
+        """
+        Map boundary conditions from geometric nodes to DOF structure.
+        
+        Args:
+            bc_geom (np.ndarray): BC at geometric nodes, shape (N,)
+            
+        Returns:
+            np.ndarray: BC at DOF nodes, shape (num_dofs,)
+        """
+        if self.is_discontinuous:
+            return self.element_mesh.map_bc_from_geometric(bc_geom)
+        else:
+            return bc_geom.copy()
+    
+    def _build_jump_matrix(self, jump_coeff: np.ndarray | None) -> np.ndarray:
+        """
+        Build the jump coefficient matrix C.
+        
+        For continuous elements, can use solid angle computation.
+        For discontinuous elements, typically use 0.5 (smooth closed surface).
+        
+        Args:
+            jump_coeff (np.ndarray | None): Custom jump coefficients, or None
+                to use defaults.
+                
+        Returns:
+            np.ndarray: Diagonal matrix C, shape (num_dofs, num_dofs)
+        """
+        num_dofs = self.element_mesh.num_dofs
+        
+        if jump_coeff is not None:
+            if jump_coeff.shape[0] != num_dofs:
+                raise ValueError(f"jump_coeff size {jump_coeff.shape[0]} "
+                               f"does not match num_dofs {num_dofs}")
+            return np.diag(jump_coeff)
+        
+        # Use defaults
+        if self.is_discontinuous:
+            # For discontinuous elements on smooth closed surfaces, use 0.5
+            # (collocation points are interior, not on boundary)
+            return 0.5 * np.eye(num_dofs, dtype=complex)
+        else:
+            # For continuous elements, try to use solid angle computation
+            try:
+                # Map geometric node jump coefficients to DOFs
+                jump_geom = self.mesh.jump_coefficients
+                return np.diag(self._map_bc_to_dofs(jump_geom))
+            except AttributeError:
+                # Fallback to 0.5 if not available
+                return 0.5 * np.eye(num_dofs, dtype=complex)
+    
+    def __repr__(self) -> str:
+        overdetermined_str = " (overdetermined)" if self.is_overdetermined else ""
+        return (f"BEMSolver(element_type='{self.element_type}'{overdetermined_str}, "
+                f"num_elements={self.mesh.num_elements}, "
+                f"num_dofs={self.element_mesh.num_dofs})")
