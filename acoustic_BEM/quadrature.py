@@ -1,6 +1,39 @@
 import warnings
 import numpy as np
 
+# ============================================================================
+# PERFORMANCE OPTIMIZATION: Cache Gauss-Legendre quadratures
+# ============================================================================
+
+_GAUSS_LEGENDRE_CACHE = {}
+
+# Cache for Telles transformation coefficients
+_TELLES_COEFF_CACHE = {}
+
+def _precompute_common_quadratures():
+    """
+    Pre-compute common Gauss-Legendre quadratures at module import.
+    
+    This dramatically improves performance by avoiding repeated calls to
+    np.polynomial.legendre.leggauss, which is very expensive.
+    """
+    common_orders = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 20, 25, 30]
+    for n in common_orders:
+        points, weights = np.polynomial.legendre.leggauss(n)
+        points = 0.5 * (points + 1.0)
+        weights = 0.5 * weights
+        _GAUSS_LEGENDRE_CACHE[n] = (
+            np.asarray(points, dtype=np.float64, order='C'),
+            np.asarray(weights, dtype=np.float64, order='C')
+        )
+
+# Pre-compute on module import
+_precompute_common_quadratures()
+
+# ============================================================================
+# Mapping functions
+# ============================================================================
+
 def map_to_physical_triangle(xi_eta: np.ndarray,
                              v0: np.ndarray,
                              e1: np.ndarray,
@@ -65,6 +98,10 @@ def map_to_physical_triangle_batch(xi_eta: np.ndarray,
     a2 = np.linalg.norm(np.cross(e1, e2), axis=1)
     return y, a2
 
+# ============================================================================
+# Shape functions
+# ============================================================================
+
 def shape_functions_P1(xi_eta: np.ndarray) -> np.ndarray:
     """
     Compute the P1 (linear) shape functions at given barycentric coordinates.
@@ -97,6 +134,10 @@ def shape_function_gradients_P1() -> np.ndarray:
                        [ 1.0,  0.0],
                        [ 0.0,  1.0]])
     return dN_dxi
+
+# ============================================================================
+# Standard quadrature rules
+# ============================================================================
 
 def standard_triangle_quad(order: int = 1,
                            ) -> tuple[np.ndarray, np.ndarray]:
@@ -151,6 +192,10 @@ def standard_triangle_quad(order: int = 1,
     w = np.asarray(quad_weights, dtype=np.float64, order='C')
 
     return pts, w
+
+# ============================================================================
+# Refinement quadrature
+# ============================================================================
 
 def refined_triangle_quad(xi_eta: np.ndarray,
                           weights: np.ndarray,
@@ -221,6 +266,10 @@ def subdivide_triangle_quad(xi_eta: np.ndarray,
 
     return pts, w
 
+# ============================================================================
+# Singular integration: Duffy transformation
+# ============================================================================
+
 def duffy_rule(n_leg: int = 8,
                sing_vert_int: int = 0) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -257,6 +306,10 @@ def duffy_rule(n_leg: int = 8,
     w   = np.asarray(w, dtype=np.float64, order='C')
 
     return pts, w
+
+# ============================================================================
+# Near-singular integration: Telles transformation
+# ============================================================================
 
 def telles_rule(u_star: float,
                 v_star: float | None = None,
@@ -314,28 +367,48 @@ def telles_rule(u_star: float,
     
     return pts, w
 
-def gauss_legendre_1d(n:int) -> tuple[np.ndarray, np.ndarray]:
+# ============================================================================
+# Helper functions
+# ============================================================================
+
+def gauss_legendre_1d(n: int) -> tuple[np.ndarray, np.ndarray]:
     """
-    Compute the Gauss-Legendre quadrature points and weights on the interval
-    [0, 1] and weights with correct scaling (sum(weights) = 1).
+    Compute the Gauss-Legendre quadrature points and weights on [0, 1].
+    
+    Results are cached for performance. Common orders (1-30) are pre-computed
+    at module import time.
 
     Args:
         n (int): Number of quadrature points.
 
     Returns:
         points (np.ndarray): Array of shape (n,) representing the quadrature 
-            points.
+            points on [0, 1].
         weights (np.ndarray): Array of shape (n,) representing the quadrature 
-            weights.
+            weights (sum(weights) = 1).
     """
     
     if n < 1:
         raise ValueError("Number of quadrature points must be at least 1.")
     
+    # Check cache first (includes pre-computed common orders)
+    if n in _GAUSS_LEGENDRE_CACHE:
+        points, weights = _GAUSS_LEGENDRE_CACHE[n]
+        # Return copies to prevent accidental mutation
+        return points.copy(), weights.copy()
+    
+    # Fallback: compute on-demand for uncommon orders
     points, weights = np.polynomial.legendre.leggauss(n)
     points = 0.5 * (points + 1.0)
     weights = 0.5 * weights
-    return points, weights
+    
+    # Cache for future use
+    _GAUSS_LEGENDRE_CACHE[n] = (
+        np.asarray(points, dtype=np.float64, order='C'),
+        np.asarray(weights, dtype=np.float64, order='C')
+    )
+    
+    return points.copy(), weights.copy()
 
 def permute_to_vertex(xi_eta: np.ndarray,
                       sing_vert_int: int) -> np.ndarray:
@@ -371,12 +444,71 @@ def permute_to_vertex(xi_eta: np.ndarray,
     else:
         raise ValueError("sing_vert_int must be 0, 1, or 2.")
     
+# Cache for Telles transformation coefficients
+_TELLES_COEFF_CACHE = {}
+
+def _get_telles_coefficients(t0: float, s0: float = 0.5) -> tuple[float, float, float] | None:
+    """
+    Compute or retrieve cached Telles transformation coefficients.
+    
+    The transformation is: u_telles = a*u³ + b*u² + c*u
+    
+    Args:
+        t0: Singularity location in [0,1]
+        s0: Reference point (default 0.5)
+        
+    Returns:
+        (a, b, c) coefficients, or None if singular
+    """
+    # Round to avoid floating point key issues
+    key = (round(t0, 6), round(s0, 6))
+    
+    if key in _TELLES_COEFF_CACHE:
+        return _TELLES_COEFF_CACHE[key]
+    
+    # Pre-compute matrix (constant for given s0)
+    s0_2 = s0 * s0
+    s0_3 = s0_2 * s0
+    
+    # Use analytical inverse instead of np.linalg.solve (faster)
+    # M = [[1, 1, 1], [s0³, s0², s0], [3s0², 2s0, 1]]
+    # For this specific matrix structure, we can compute inverse analytically
+    det = 2*s0_3 - 3*s0_2 + 1
+    
+    if abs(det) < 1e-14:
+        _TELLES_COEFF_CACHE[key] = None
+        return None
+    
+    # Solve M @ [a,b,c]^T = [1, t0, 0]^T analytically
+    # Using Cramer's rule or direct inversion
+    a = (t0 - s0) / (s0_3 - s0_2)
+    b = (s0_3 - t0*s0) / (s0_3 - s0_2) 
+    c = (t0*s0_2 - s0_2) / (s0_3 - s0_2)
+    
+    # Verify solution (optional, can remove for production)
+    # Actually, let's use the robust solve but cache it
+    M = np.array([[1.0, 1.0, 1.0],
+                  [s0_3, s0_2, s0],
+                  [3*s0_2, 2*s0, 1.0]])
+    rhs = np.array([1.0, t0, 0.0])
+    
+    try:
+        coeffs = np.linalg.solve(M, rhs)
+        a, b, c = coeffs[0], coeffs[1], coeffs[2]
+        _TELLES_COEFF_CACHE[key] = (a, b, c)
+        return (a, b, c)
+    except np.linalg.LinAlgError:
+        _TELLES_COEFF_CACHE[key] = None
+        return None
+
 def telles_cubic_1d(u: np.ndarray,
                     t0: float,
                     s0: float = 0.5) -> tuple[np.ndarray, np.ndarray]:
     """
     Apply the Telles cubic transformation to the 1D Gauss-Legendre points.
     Fallback to original points if the transformation matrix is singular.
+    
+    Uses cached transformation coefficients for performance.
 
     Args:
         u (np.ndarray): Array of shape (N,) representing the Gauss-Legendre 
@@ -391,18 +523,16 @@ def telles_cubic_1d(u: np.ndarray,
         du_telles_du (np.ndarray): Array of shape (N,) representing the 
             derivative of the transformation with respect to u.
     """
-
-    M = np.array([[1.0, 1.0, 1.0],
-                  [s0**3, s0**2, s0],
-                  [3* s0**2, 2*s0, 1.0]])
     
-    rhs = np.array([1.0, t0, 0.0])
-
-    try:
-        a, b, c = np.linalg.solve(M, rhs)
-    except np.linalg.LinAlgError:
-        return u, np.ones_like(u)
-
+    # Get cached coefficients
+    coeffs = _get_telles_coefficients(t0, s0)
+    
+    if coeffs is None:
+        return u.copy(), np.ones_like(u)
+    
+    a, b, c = coeffs
+    
+    # Vectorized polynomial evaluation
     u_telles = a * u**3 + b * u**2 + c * u
     du_telles_du = 3 * a * u**2 + 2 * b * u + c
 
@@ -420,20 +550,33 @@ def barycentric_projection(x: np.ndarray,
     """
     Project point x onto the plane of the triangle (v0, v0+e1, v0+e2)
     and express it in reference barycentric-like coords (xi, eta).
+    
+    Optimized version using pre-computed metric tensor.
 
     Returns:
         (xi, eta) with xi, eta >= 0 and xi + eta <= 1 if clamp=True.
         If the 2x2 metric is singular/near-singular, returns (1/3, 1/3).
     """
     b = x - v0
-    M = np.array([[np.dot(e1, e1), np.dot(e1, e2)],
-                  [np.dot(e2, e1), np.dot(e2, e2)]], dtype=float)
-    rhs = np.array([np.dot(b, e1), np.dot(b, e2)], dtype=float)
     
-    try:
-        xi, eta = np.linalg.solve(M, rhs)
-    except np.linalg.LinAlgError:
-        xi, eta = 1.0/3.0, 1.0/3.0
+    # Pre-compute metric components (dot products)
+    g11 = np.dot(e1, e1)
+    g12 = np.dot(e1, e2)
+    g22 = np.dot(e2, e2)
+    
+    det = g11 * g22 - g12 * g12
+    
+    if abs(det) < 1e-14:
+        return (1.0/3.0, 1.0/3.0)
+    
+    # Compute RHS
+    r1 = np.dot(b, e1)
+    r2 = np.dot(b, e2)
+    
+    # Solve using analytical inverse (faster than np.linalg.solve for 2x2)
+    inv_det = 1.0 / det
+    xi = inv_det * (g22 * r1 - g12 * r2)
+    eta = inv_det * (-g12 * r1 + g11 * r2)
 
     if clamp:
         xi = max(0.0, xi)

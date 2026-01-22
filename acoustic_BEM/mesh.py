@@ -98,8 +98,8 @@ class Mesh:
 
         self.jump_coefficients = jump_coefficients
 
-        self.field_points = self.field.field_points if self.field is not None \
-            else None
+        # self.field_points = self.field.field_points if self.field is not None \
+        #     else None
         self.field_c0 = (self.field.c0 if self.field is not None else None)
         self.field_rho0 = (self.field.rho0 if self.field is not None else None)
 

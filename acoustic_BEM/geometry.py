@@ -190,8 +190,8 @@ class Body:
     
 class Field:
     def __init__(self,
-                 field_extent: np.ndarray,
-                 num_points: np.ndarray,
+                #  field_extent: np.ndarray,
+                #  num_points: np.ndarray,
                  rho0: float = 1.225,
                  c0: float = 343.0,):
         """
@@ -209,35 +209,35 @@ class Field:
             c0 (float): Speed of sound in the medium (default is 343 m/s for 
                 air).
         """
-        self.field_extent = field_extent
-        self.num_points = num_points
+        # self.field_extent = field_extent
+        # self.num_points = num_points
         self.rho0 = rho0
         self.c0 = c0
         
-        if np.any(self.num_points < 1):
-            raise ValueError("num_points must be positive integers.")
-        if self.field_extent.shape != (3, 2):
-            raise ValueError("field_extent must be of shape (3, 2).")
-        if np.any(self.field_extent[:, 1] <= self.field_extent[:, 0]):
-            raise ValueError("In field_extent, max values must be greater "\
-                             "than min values.")
+        # if np.any(self.num_points < 1):
+        #     raise ValueError("num_points must be positive integers.")
+        # if self.field_extent.shape != (3, 2):
+        #     raise ValueError("field_extent must be of shape (3, 2).")
+        # if np.any(self.field_extent[:, 1] <= self.field_extent[:, 0]):
+        #     raise ValueError("In field_extent, max values must be greater "\
+        #                      "than min values.")
         
-        xs = np.linspace(self.field_extent[0, 0],
-                         self.field_extent[0, 1],
-                         self.num_points[0])
-        ys = np.linspace(self.field_extent[1, 0],
-                         self.field_extent[1, 1],
-                         self.num_points[1])
-        zs = np.linspace(self.field_extent[2, 0],
-                         self.field_extent[2, 1],
-                         self.num_points[2])
+        # xs = np.linspace(self.field_extent[0, 0],
+        #                  self.field_extent[0, 1],
+        #                  self.num_points[0])
+        # ys = np.linspace(self.field_extent[1, 0],
+        #                  self.field_extent[1, 1],
+        #                  self.num_points[1])
+        # zs = np.linspace(self.field_extent[2, 0],
+        #                  self.field_extent[2, 1],
+        #                  self.num_points[2])
         
-        self.X, self.Y, self.Z = np.meshgrid(xs, ys, zs, indexing='ij')
-        pts = np.vstack([self.X.ravel(),
-                         self.Y.ravel(),
-                         self.Z.ravel()]).T
+        # self.X, self.Y, self.Z = np.meshgrid(xs, ys, zs, indexing='ij')
+        # pts = np.vstack([self.X.ravel(),
+        #                  self.Y.ravel(),
+        #                  self.Z.ravel()]).T
 
-        self.field_points = pts
+        # self.field_points = pts
         
 def box_mesh(center: np.ndarray,
              size: np.ndarray,

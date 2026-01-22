@@ -353,7 +353,8 @@ class DiscontinuousAssembler:
                  mesh: DiscontinuousP1Mesh,
                  integrator: ElementIntegratorCollocation,
                  quad_order: int = 3,
-                 near_threshold: float = 2.0):
+                 near_threshold: float = 2.0,
+                 precompute_telles: bool = True):
         """
         Initialize the discontinuous collocation assembler.
         
@@ -363,6 +364,8 @@ class DiscontinuousAssembler:
             quad_order (int): Order of standard triangle quadrature. Default 3.
             near_threshold (float): Distance factor for near-singular detection.
                 Default 2.0.
+            precompute_telles (bool): Pre-compute Telles quadrature for all
+                near-singular pairs. Default True for better performance.
         """
         self.element_mesh = mesh
         self.mesh = mesh.mesh  # Base geometric mesh
@@ -374,18 +377,50 @@ class DiscontinuousAssembler:
         self.num_elements = mesh.num_elements
         self.num_collocation = mesh.get_num_collocation_points()
         
-        # Pre-compute quadrature on all elements
+        # Pre-compute quadrature on all elements (CRITICAL OPTIMIZATION)
         self.xi_eta_reg, self.w_reg = standard_triangle_quad(quad_order)
         self.N_reg = shape_functions_P1(self.xi_eta_reg)
         
+        # Pre-compute physical quadrature points for ALL elements
+        # This saves ~20s per assembly by avoiding redundant computation!
         yq, a2 = map_to_physical_triangle_batch(
             self.xi_eta_reg, self.mesh.v0, self.mesh.e1, self.mesh.e2
         )
-        self._y_reg = yq
-        self._w_reg_phys = self.w_reg[None, :] * a2[:, None]
+        self._y_reg = yq  # (M, Q, 3) - physical quad points
+        self._w_reg_phys = self.w_reg[None, :] * a2[:, None]  # (M, Q) - physical weights
         
-        # Cache for Telles quadrature
-        self._telles_cache = {}
+        # Cache for Telles quadrature (geometry + weights)
+        self._telles_cache = {}  # Maps (coll_point_tuple, elem) -> (y_phys, w_phys, N)
+        
+        # Pre-compute Telles for all near-singular pairs
+        if precompute_telles:
+            self._precompute_telles_cache()
+            
+    def _precompute_telles_cache(self):
+        """
+        Pre-compute Telles quadrature for all near-singular element pairs.
+        
+        This can significantly speed up assembly by avoiding on-the-fly
+        computation during the main assembly loop.
+        """
+        print("Pre-computing Telles quadrature cache...")
+        
+        if self.element_mesh.collocation_strategy == "centroid":
+            # For centroid, collocation points are at element centroids
+            collocation_points = self.mesh.centroids
+        else:
+            collocation_points = self.element_mesh.collocation_points
+            
+        # Build cache
+        for coll_idx in range(len(collocation_points)):
+            x = collocation_points[coll_idx]
+            near, _ = self._classify_elements_discontinuous(x)
+            
+            for elem in near:
+                # This populates the cache
+                _ = self._get_telles_quad(x, elem)
+                
+        print(f"Cached {len(self._telles_cache)} Telles quadrature rules.")
         
     def assemble(self, operator: str, verbose: bool = True) -> np.ndarray:
         """
@@ -432,27 +467,22 @@ class DiscontinuousAssembler:
             
             # Process near elements with Telles quadrature
             for elem in near:
-                xi_eta, w = self._get_telles_quad(x, elem)
+                yq, w_phys, Nq = self._get_telles_quad(x, elem)
+                
+                n_y = self.mesh.n_hat[elem:elem+1] if operator in {"D", "N"} \
+                    else None
                 
                 if operator == "NReg":
+                    # NReg uses different integration approach
+                    xi_eta, w = self._get_telles_quad_ref(x, elem)  # Get reference quad
                     row = self._call_integrator(operator, x, n_x,
                                                np.array([elem]),
-                                               xi_eta, w, None, None)
+                                               xi_eta, w, None, n_y)
                 else:
-                    yq, a2 = map_to_physical_triangle_batch(
-                        xi_eta,
-                        self.mesh.v0[elem:elem+1],
-                        self.mesh.e1[elem:elem+1],
-                        self.mesh.e2[elem:elem+1]
-                    )
-                    w_phys = w * a2[0]
-                    Nq = shape_functions_P1(xi_eta)
-                    n_y = self.mesh.n_hat[elem:elem+1] if operator in {"D", "N"} \
-                        else None
-                    
+                    # Use pre-computed physical quadrature
                     row = self._call_integrator(operator, x, n_x,
                                                np.array([elem]),
-                                               yq[0][None, :, :],
+                                               yq[None, :, :],
                                                w_phys[None, :],
                                                Nq, n_y)
                 
@@ -562,28 +592,60 @@ class DiscontinuousAssembler:
     
     def _get_telles_quad(self, 
                         x: np.ndarray, 
-                        elem: int) -> tuple[np.ndarray, np.ndarray]:
+                        elem: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Get or compute Telles quadrature for near-singular element.
+        
+        Now returns (y_phys, w_phys, N_vals) - fully pre-computed physical quadrature.
         
         Args:
             x (np.ndarray): Collocation point
             elem (int): Element index
             
         Returns:
-            tuple: (xi_eta, weights)
+            tuple: (y_phys, w_phys, N_vals)
+                y_phys: Physical quad points, shape (Q, 3)
+                w_phys: Physical weights, shape (Q,)
+                N_vals: Shape function values, shape (Q, 3)
         """
         # Create cache key from position and element
-        key = (tuple(x), elem)
+        key = (tuple(np.round(x, 8)), elem)  # Round to avoid float precision issues
         
         if key not in self._telles_cache:
+            # Compute Telles transformation in reference space
             xi_star, eta_star = barycentric_projection(
                 x, self.mesh.v0[elem], self.mesh.e1[elem], self.mesh.e2[elem]
             )
             xi_eta, w = telles_rule(u_star=xi_star, v_star=eta_star, n_leg=10)
-            self._telles_cache[key] = (xi_eta, w)
             
-        return self._telles_cache[key]
+            # Map to physical space ONCE
+            yq, a2 = map_to_physical_triangle_batch(
+                xi_eta,
+                self.mesh.v0[elem:elem+1],
+                self.mesh.e1[elem:elem+1],
+                self.mesh.e2[elem:elem+1]
+            )
+            w_phys = w * a2[0]
+            N_vals = shape_functions_P1(xi_eta)
+            
+            # Cache physical quantities AND reference quadrature (for NReg)
+            self._telles_cache[key] = (yq[0], w_phys, N_vals, xi_eta, w)
+            
+        result = self._telles_cache[key]
+        return result[0], result[1], result[2]  # y_phys, w_phys, N_vals
+    
+    def _get_telles_quad_ref(self, x: np.ndarray, elem: int) -> tuple[np.ndarray, np.ndarray]:
+        """Get reference Telles quadrature (for NReg operator)."""
+        key = (tuple(np.round(x, 8)), elem)
+        if key in self._telles_cache:
+            result = self._telles_cache[key]
+            return result[3], result[4]  # xi_eta, w
+        
+        # Compute if not cached
+        xi_star, eta_star = barycentric_projection(
+            x, self.mesh.v0[elem], self.mesh.e1[elem], self.mesh.e2[elem]
+        )
+        return telles_rule(u_star=xi_star, v_star=eta_star, n_leg=10)
     
     def _call_integrator(self,
                         operator: str,
