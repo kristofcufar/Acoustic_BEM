@@ -251,88 +251,105 @@ class BEMSolver:
                        phi: np.ndarray | None = None,
                        q: np.ndarray | None = None,
                        quad_order: int = 3,
-                       verbose: bool = True) -> np.ndarray:
+                       verbose: bool = True,
+                       batch_size: int = 2000) -> np.ndarray:
         """
         Evaluate the potential at domain points using boundary solution.
 
         For discontinuous elements, the solution at DOFs is automatically
         interpolated within each element using P1 shape functions.
 
+        Field points are processed in batches of ``batch_size`` to bound peak
+        memory to approximately ``batch_size * num_elements * num_quad * 80``
+        bytes.  The default of 2000 keeps peak usage below ~1.2 GB for the
+        typical mesh size.
+
         Args:
             field_points (np.ndarray): Array of M points, shape (M,3).
-            phi (np.ndarray | None): Boundary potential at DOF nodes, 
+            phi (np.ndarray | None): Boundary potential at DOF nodes,
                 shape (num_dofs,), or None.
-            q (np.ndarray | None): Boundary normal derivative at DOF nodes, 
+            q (np.ndarray | None): Boundary normal derivative at DOF nodes,
                 shape (num_dofs,), or None.
-            quad_order (int, optional): Triangle quadrature order. 
+            quad_order (int, optional): Triangle quadrature order.
                 Defaults to 3.
             verbose (bool): Show progress bar.
+            batch_size (int): Number of field points per batch. Reduce if
+                memory is tight; increase for faster evaluation on machines
+                with abundant RAM.
 
         Returns:
             np.ndarray: Complex potential at field points, shape (M,).
         """
         if phi is None:
-            try: 
+            try:
                 phi = self.potential_BC
             except AttributeError:
-                raise ValueError("Boundary potential not found. Provide as " 
-                "Dirichlet BC or run solve_direct to compute from Neumann " 
+                raise ValueError("Boundary potential not found. Provide as "
+                "Dirichlet BC or run solve_direct to compute from Neumann "
                 "boundary conditions.")
-            
+
         if q is None:
             try:
                 q = self.velocity_BC
             except AttributeError:
-                raise ValueError("Boundary normal derivative not found. " 
-                "Provide as Neumann BC or run solve_direct to compute from " 
+                raise ValueError("Boundary normal derivative not found. "
+                "Provide as Neumann BC or run solve_direct to compute from "
                 "Dirichlet boundary conditions.")
 
         # Set up quadrature
         xi_eta, w = standard_triangle_quad(quad_order)
         Nq = shape_functions_P1(xi_eta)
         yq, a2 = map_to_physical_triangle_batch(xi_eta,
-                                               self.mesh.v0, 
-                                               self.mesh.e1, 
+                                               self.mesh.v0,
+                                               self.mesh.e1,
                                                self.mesh.e2)
-        w_phys = w[None, :, None] * a2[:, None, None]
+        # w_phys: (E, Q)
+        w_phys = (w[None, :, None] * a2[:, None, None])[:, :, 0]
 
-        # Compute kernels
-        r_norm, r_hat = r_vec(field_points[:, None, None, :], 
-                             yq[None, :, :, :])[1:]
-
-        Gvals = G(r_norm, self.mesh.k)
-        dGr = dG_dr(r_norm, Gvals, self.mesh.k)
-
-        ny_b = self.mesh.n_hat[None, :, None, :]
-        dGdnY = dG_dn_y(r_hat, dGr, ny_b)
-
-        u = np.zeros(field_points.shape[0], dtype=complex)
-
-        # Integrate over elements
-        for e in tqdm(range(self.mesh.num_elements), 
-                      desc="Evaluating pressure field at points",
-                      disable = not verbose):
-            
-            # Get DOF values for this element
+        # Pre-compute weighted DOF values at quadrature points for all elements.
+        # phi_wq[e, q] = (Nq @ phi_elem)[q] * w_phys[e, q]  (complex)
+        # q_wq  [e, q] = (Nq @ q_elem)  [q] * w_phys[e, q]  (complex)
+        E  = self.mesh.num_elements
+        Nq_count = len(w)
+        phi_wq = np.empty((E, Nq_count), dtype=complex)
+        q_wq   = np.empty((E, Nq_count), dtype=complex)
+        for e in range(E):
             if self.is_discontinuous:
-                dof_indices = self.element_mesh.get_dof_in_element(e)
-                phi_elem = phi[dof_indices]
-                q_elem = q[dof_indices]
+                dof_idx  = self.element_mesh.get_dof_in_element(e)
+                phi_elem = phi[dof_idx]
+                q_elem   = q[dof_idx]
             else:
-                # Continuous elements: DOFs are node indices
-                conn = self.mesh.mesh_elements[e]
+                conn     = self.mesh.mesh_elements[e]
                 phi_elem = phi[conn]
-                q_elem = q[conn]
+                q_elem   = q[conn]
+            phi_wq[e] = (Nq @ phi_elem) * w_phys[e]
+            q_wq[e]   = (Nq @ q_elem)   * w_phys[e]
 
-            # Interpolate to quadrature points using shape functions
-            phi_q = Nq @ phi_elem
-            q_q = Nq @ q_elem
+        # Normal vectors: (E, 1, 3) for broadcasting with (B, E, Q, 3)
+        ny_b = self.mesh.n_hat[:, None, :]   # (E, 1, 3)
 
-            wq = w_phys[e, :, 0]
+        M = field_points.shape[0]
+        u = np.zeros(M, dtype=complex)
 
-            # Accumulate contributions
-            u += np.sum(dGdnY[:, e, :] * (phi_q[None, :] * wq[None, :]), axis=1)
-            u -= np.sum(Gvals[:, e, :] * (q_q[None, :] * wq[None, :]), axis=1)
+        n_batches = (M + batch_size - 1) // batch_size
+        for i in tqdm(range(n_batches),
+                      desc="Evaluating field",
+                      disable=not verbose):
+            start = i * batch_size
+            end   = min(start + batch_size, M)
+            fp    = field_points[start:end]          # (B, 3)
+
+            # Kernels: (B, E, Q) — vectorised over all elements at once
+            r_norm, r_hat = r_vec(fp[:, None, None, :],
+                                  yq[None, :, :, :])[1:]
+
+            Gvals = G(r_norm, self.mesh.k)
+            dGr   = dG_dr(r_norm, Gvals, self.mesh.k)
+            dGdnY = dG_dn_y(r_hat, dGr, ny_b[None, :, :, :])
+
+            # Sum over all elements and quadrature points in one step
+            u[start:end] = (  np.einsum('beq,eq->b', dGdnY, phi_wq)
+                            - np.einsum('beq,eq->b', Gvals,  q_wq))
 
         return u
     
